@@ -71,7 +71,7 @@ use model::machine::{
     ManagedHostStateSnapshot, MeasuringState, NetworkConfigUpdateState, NextStateBFBSupport,
     PerformPowerOperation, PowerDrainState, ReprovisionState, RetryInfo, SecureEraseBossContext,
     SecureEraseBossState, SetBootOrderInfo, SetBootOrderState, SetSecureBootState,
-    StateMachineArea, UefiSetupInfo, UefiSetupState, ValidationState,
+    StateMachineArea, UefiSetupInfo, UefiSetupState, ValidationState, VerifyBootOrderState,
     dpf_based_dpu_provisioning_possible, get_display_ids,
 };
 use model::power_manager::PowerHandlingOutcome;
@@ -4159,6 +4159,7 @@ enum BiosConfigOutcome {
 enum SetBootOrderOutcome {
     Continue(SetBootOrderInfo),
     Done,
+    BootOrderIncorrect,
     WaitingForReboot(String),
 }
 
@@ -4479,6 +4480,7 @@ async fn handle_host_boot_order_setup(
 
     let next_state = match set_boot_order_info {
         Some(info) => {
+            let retry_count = info.retry_count;
             match set_host_boot_order(
                 ctx,
                 &host_handler_params.reachability_params,
@@ -4504,6 +4506,22 @@ async fn handle_host_boot_order_setup(
                         ManagedHostState::HostInit {
                             machine_state: MachineState::WaitingForDiscovery,
                         }
+                    }
+                }
+                SetBootOrderOutcome::BootOrderIncorrect => {
+                    tracing::warn!(
+                        "Boot order incorrect for {} after SetBootOrder in HostInit, retrying SetBootOrder (retry {} of 3)",
+                        mh_snapshot.host_snapshot.id,
+                        retry_count + 1,
+                    );
+                    ManagedHostState::HostInit {
+                        machine_state: MachineState::SetBootOrder {
+                            set_boot_order_info: Some(SetBootOrderInfo {
+                                set_boot_order_jid: None,
+                                set_boot_order_state: SetBootOrderState::SetBootOrder,
+                                retry_count: retry_count + 1,
+                            }),
+                        },
                     }
                 }
                 SetBootOrderOutcome::WaitingForReboot(reason) => {
@@ -9196,10 +9214,14 @@ async fn handle_instance_host_platform_config(
                 })?;
 
             InstanceState::HostPlatformConfiguration {
-                platform_config_state: HostPlatformConfigurationState::ConfigureBios,
+                platform_config_state: HostPlatformConfigurationState::ConfigureBios {
+                    boot_order_retry_count: 0,
+                },
             }
         }
-        HostPlatformConfigurationState::ConfigureBios => {
+        HostPlatformConfigurationState::ConfigureBios {
+            boot_order_retry_count,
+        } => {
             match configure_host_bios(
                 ctx,
                 reachability_params,
@@ -9209,12 +9231,13 @@ async fn handle_instance_host_platform_config(
             .await?
             {
                 BiosConfigOutcome::Done => {
-                    // BIOS configuration done, move to polling
                     return Ok(StateHandlerOutcome::transition(
                         ManagedHostState::Assigned {
                             instance_state: InstanceState::HostPlatformConfiguration {
                                 platform_config_state:
-                                    HostPlatformConfigurationState::PollingBiosSetup,
+                                    HostPlatformConfigurationState::PollingBiosSetup {
+                                        boot_order_retry_count,
+                                    },
                             },
                         },
                     ));
@@ -9224,7 +9247,9 @@ async fn handle_instance_host_platform_config(
                 }
             }
         }
-        HostPlatformConfigurationState::PollingBiosSetup => {
+        HostPlatformConfigurationState::PollingBiosSetup {
+            boot_order_retry_count,
+        } => {
             let next_instance_state = InstanceState::HostPlatformConfiguration {
                 platform_config_state: HostPlatformConfigurationState::SetBootOrder {
                     set_boot_order_info: SetBootOrderInfo {
@@ -9232,6 +9257,7 @@ async fn handle_instance_host_platform_config(
                         set_boot_order_state: SetBootOrderState::SetBootOrder,
                         retry_count: 0,
                     },
+                    boot_order_retry_count,
                 },
             };
 
@@ -9283,6 +9309,7 @@ async fn handle_instance_host_platform_config(
         }
         HostPlatformConfigurationState::SetBootOrder {
             set_boot_order_info,
+            boot_order_retry_count,
         } => {
             match set_host_boot_order(
                 ctx,
@@ -9297,16 +9324,41 @@ async fn handle_instance_host_platform_config(
                     InstanceState::HostPlatformConfiguration {
                         platform_config_state: HostPlatformConfigurationState::SetBootOrder {
                             set_boot_order_info: boot_order_info,
+                            boot_order_retry_count,
                         },
                     }
                 }
                 SetBootOrderOutcome::Done => InstanceState::HostPlatformConfiguration {
-                    platform_config_state: HostPlatformConfigurationState::LockHost,
+                    platform_config_state: HostPlatformConfigurationState::VerifyBootOrder {
+                        verify_state: VerifyBootOrderState::WaitingForDpusToUp,
+                        boot_order_retry_count,
+                    },
                 },
+                SetBootOrderOutcome::BootOrderIncorrect => {
+                    return boot_order_retry_or_fail(
+                        mh_snapshot,
+                        boot_order_retry_count,
+                        "SetBootOrder CheckBootOrder",
+                    );
+                }
                 SetBootOrderOutcome::WaitingForReboot(reason) => {
                     return Ok(StateHandlerOutcome::wait(reason));
                 }
             }
+        }
+        HostPlatformConfigurationState::VerifyBootOrder {
+            verify_state,
+            boot_order_retry_count,
+        } => {
+            return handle_verify_boot_order(
+                ctx,
+                mh_snapshot,
+                reachability_params,
+                redfish_client.as_ref(),
+                verify_state,
+                boot_order_retry_count,
+            )
+            .await;
         }
         HostPlatformConfigurationState::LockHost => {
             redfish_client
@@ -9323,6 +9375,135 @@ async fn handle_instance_host_platform_config(
 
     let next_state = ManagedHostState::Assigned { instance_state };
 
+    Ok(StateHandlerOutcome::transition(next_state))
+}
+
+const MAX_BOOT_ORDER_RETRIES: u32 = 3;
+
+fn boot_order_retry_or_fail(
+    mh_snapshot: &ManagedHostStateSnapshot,
+    boot_order_retry_count: u32,
+    checkpoint: &str,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let next_count = boot_order_retry_count + 1;
+
+    if next_count > MAX_BOOT_ORDER_RETRIES {
+        return Err(StateHandlerError::GenericError(eyre::eyre!(
+            "Boot order configuration failed for {} at {} after {} retries",
+            mh_snapshot.host_snapshot.id,
+            checkpoint,
+            boot_order_retry_count,
+        )));
+    }
+
+    tracing::warn!(
+        "Boot order incorrect for {} at {}, retrying BIOS configuration (retry {} of {})",
+        mh_snapshot.host_snapshot.id,
+        checkpoint,
+        next_count,
+        MAX_BOOT_ORDER_RETRIES,
+    );
+
+    Ok(StateHandlerOutcome::transition(
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::ConfigureBios {
+                    boot_order_retry_count: next_count,
+                },
+            },
+        },
+    ))
+}
+
+async fn handle_verify_boot_order(
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    mh_snapshot: &mut ManagedHostStateSnapshot,
+    reachability_params: &ReachabilityParams,
+    redfish_client: &dyn Redfish,
+    verify_state: VerifyBootOrderState,
+    boot_order_retry_count: u32,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let instance_state = match verify_state {
+        VerifyBootOrderState::WaitingForDpusToUp => {
+            if !are_dpus_up_trigger_reboot_if_needed(mh_snapshot, reachability_params, ctx).await {
+                return Ok(StateHandlerOutcome::wait(
+                    "VerifyBootOrder: waiting for DPUs to come up.".to_string(),
+                ));
+            }
+
+            InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::VerifyBootOrder {
+                    verify_state: VerifyBootOrderState::RebootHost,
+                    boot_order_retry_count,
+                },
+            }
+        }
+        VerifyBootOrderState::RebootHost => {
+            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
+
+            InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::VerifyBootOrder {
+                    verify_state: VerifyBootOrderState::WaitForBoot,
+                    boot_order_retry_count,
+                },
+            }
+        }
+        VerifyBootOrderState::WaitForBoot => {
+            let basetime = mh_snapshot.host_snapshot.state.version.timestamp();
+
+            if wait(&basetime, Duration::minutes(2)) {
+                return Ok(StateHandlerOutcome::wait(
+                    "VerifyBootOrder: waiting for host to boot after restart.".to_string(),
+                ));
+            }
+
+            InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::VerifyBootOrder {
+                    verify_state: VerifyBootOrderState::CheckBootOrder,
+                    boot_order_retry_count,
+                },
+            }
+        }
+        VerifyBootOrderState::CheckBootOrder => {
+            let primary_interface = mh_snapshot
+                .host_snapshot
+                .interfaces
+                .iter()
+                .find(|x| x.primary_interface)
+                .ok_or_else(|| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "Missing primary interface from host: {}",
+                        mh_snapshot.host_snapshot.id
+                    ))
+                })?;
+
+            let boot_order_configured = redfish_client
+                .is_boot_order_setup(&primary_interface.mac_address.to_string())
+                .await
+                .map_err(|e| StateHandlerError::RedfishError {
+                    operation: "is_boot_order_setup",
+                    error: e,
+                })?;
+
+            if boot_order_configured {
+                tracing::info!(
+                    "VerifyBootOrder: boot order verified for {} after reboot",
+                    mh_snapshot.host_snapshot.id,
+                );
+                InstanceState::HostPlatformConfiguration {
+                    platform_config_state: HostPlatformConfigurationState::LockHost,
+                }
+            } else {
+                return boot_order_retry_or_fail(
+                    mh_snapshot,
+                    boot_order_retry_count,
+                    "VerifyBootOrder CheckBootOrder",
+                );
+            }
+        }
+    };
+
+    let next_state = ManagedHostState::Assigned { instance_state };
     Ok(StateHandlerOutcome::transition(next_state))
 }
 
@@ -9707,10 +9888,7 @@ async fn set_host_boot_order(
             }
         }
         SetBootOrderState::CheckBootOrder => {
-            const MAX_BOOT_ORDER_RETRIES: u32 = 3;
-            const CHECK_BOOT_ORDER_TIMEOUT_MINUTES: i64 = 30;
-
-            let retry_count = set_boot_order_info.retry_count;
+            const CHECK_BOOT_ORDER_TIMEOUT_MINUTES: i64 = 5;
 
             let primary_interface = mh_snapshot
                 .host_snapshot
@@ -9740,42 +9918,24 @@ async fn set_host_boot_order(
                 return Ok(SetBootOrderOutcome::Done);
             }
 
-            // Boot order is not configured properly - check if we should retry
             let time_since_state_change =
                 mh_snapshot.host_snapshot.state.version.since_state_change();
 
-            tracing::warn!(
-                "Boot order check failed for {} - the host does not have its boot order configured properly after SetBootOrder (retry_count: {}, time_in_state: {} minutes)",
-                mh_snapshot.host_snapshot.id,
-                retry_count,
-                time_since_state_change.num_minutes()
-            );
-
-            // If we've been stuck for 30+ minutes and haven't exhausted retries, retry SetBootOrder
-            if time_since_state_change.num_minutes() >= CHECK_BOOT_ORDER_TIMEOUT_MINUTES
-                && retry_count < MAX_BOOT_ORDER_RETRIES
-            {
-                tracing::info!(
-                    "Boot order check timed out for {} after {} minutes, retrying SetBootOrder (retry {} of {})",
+            if time_since_state_change.num_minutes() >= CHECK_BOOT_ORDER_TIMEOUT_MINUTES {
+                tracing::warn!(
+                    "Boot order incorrect for {} after {} minutes, signaling caller to reconfigure BIOS",
                     mh_snapshot.host_snapshot.id,
-                    time_since_state_change.num_minutes(),
-                    retry_count + 1,
-                    MAX_BOOT_ORDER_RETRIES
+                    time_since_state_change.num_minutes()
                 );
 
-                return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
-                    set_boot_order_jid: None,
-                    set_boot_order_state: SetBootOrderState::SetBootOrder,
-                    retry_count: retry_count + 1,
-                }));
+                return Ok(SetBootOrderOutcome::BootOrderIncorrect);
             }
 
-            // Either still within timeout window or exhausted retries - return error
             Err(StateHandlerError::GenericError(eyre::eyre!(
-                "Boot order is not configured properly for host {} after SetBootOrder completed (retry_count: {}, time_in_state: {} minutes)",
+                "Boot order is not configured properly for host {} after SetBootOrder completed (time_in_state: {} minutes, waiting up to {} minutes)",
                 mh_snapshot.host_snapshot.id,
-                retry_count,
-                time_since_state_change.num_minutes()
+                time_since_state_change.num_minutes(),
+                CHECK_BOOT_ORDER_TIMEOUT_MINUTES
             )))
         }
     }

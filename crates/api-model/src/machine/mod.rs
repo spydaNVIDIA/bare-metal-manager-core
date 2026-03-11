@@ -1781,6 +1781,15 @@ pub enum SetBootOrderState {
     CheckBootOrder,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, EnumIter)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum VerifyBootOrderState {
+    WaitingForDpusToUp,
+    RebootHost,
+    WaitForBoot,
+    CheckBootOrder,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub struct SecureEraseBossContext {
@@ -1919,10 +1928,23 @@ pub enum HostPlatformConfigurationState {
     },
     CheckHostConfig,
     UnlockHost,
-    ConfigureBios,
-    PollingBiosSetup,
+    ConfigureBios {
+        #[serde(default)]
+        boot_order_retry_count: u32,
+    },
+    PollingBiosSetup {
+        #[serde(default)]
+        boot_order_retry_count: u32,
+    },
     SetBootOrder {
         set_boot_order_info: SetBootOrderInfo,
+        #[serde(default)]
+        boot_order_retry_count: u32,
+    },
+    VerifyBootOrder {
+        verify_state: VerifyBootOrderState,
+        #[serde(default)]
+        boot_order_retry_count: u32,
     },
     LockHost,
 }
