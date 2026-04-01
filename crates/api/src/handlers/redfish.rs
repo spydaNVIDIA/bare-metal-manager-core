@@ -46,52 +46,13 @@ pub async fn redfish_browse(
 ) -> Result<tonic::Response<::rpc::forge::RedfishBrowseResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let request = request.into_inner();
-    let uri: http::Uri = match request.uri.clone().parse() {
-        Ok(uri) => uri,
-        Err(err) => {
-            return Err(CarbideError::internal(format!("Parsing uri failed: {err}")).into());
-        }
-    };
+    let uri: http::Uri = request
+        .into_inner()
+        .uri
+        .parse()
+        .map_err(|err| CarbideError::internal(format!("Parsing uri failed: {err}")))?;
 
-    let (metadata, new_uri, headers, http_client) = create_client(
-        uri,
-        &api.database_connection,
-        api.credential_manager.as_ref(),
-        &api.dynamic_settings.bmc_proxy,
-    )
-    .await?;
-
-    let response = match http_client
-        .request(http::Method::GET, new_uri.to_string())
-        .basic_auth(metadata.user.clone(), Some(metadata.password.clone()))
-        .headers(headers)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(e) => {
-            return Err(CarbideError::internal(format!("Http request failed: {e:?}")).into());
-        }
-    };
-
-    let headers = response
-        .headers()
-        .iter()
-        .map(|(x, y)| {
-            (
-                x.to_string(),
-                String::from_utf8_lossy(y.as_bytes()).to_string(),
-            )
-        })
-        .collect::<HashMap<String, String>>();
-
-    let status = response.status();
-    let text = response.text().await.map_err(|e| {
-        CarbideError::internal(format!(
-            "Error reading response body: {e}, Status: {status}"
-        ))
-    })?;
+    let (text, headers, _status) = redfish_proxy_get(api, uri).await?;
 
     Ok(tonic::Response::new(::rpc::forge::RedfishBrowseResponse {
         text,
@@ -204,7 +165,9 @@ async fn redfish_proxy_mutate(
 
     let status = response.status().to_string();
     let text = response.text().await.map_err(|e| {
-        CarbideError::internal(format!("Error reading response body: {e}, Status: {status}"))
+        CarbideError::internal(format!(
+            "Error reading response body: {e}, Status: {status}"
+        ))
     })?;
 
     Ok((text, response_headers, status))
@@ -243,10 +206,137 @@ async fn redfish_proxy_get(
 
     let status = response.status().to_string();
     let text = response.text().await.map_err(|e| {
-        CarbideError::internal(format!("Error reading response body: {e}, Status: {status}"))
+        CarbideError::internal(format!(
+            "Error reading response body: {e}, Status: {status}"
+        ))
     })?;
 
     Ok((text, response_headers, status))
+}
+
+/// Resolves a `RedfishProxyEndpoint` enum value and optional component id
+/// into a concrete (URI path, HTTP method) pair. Returns an error for
+/// unrecognized or unspecified endpoints.
+fn resolve_proxy_endpoint(
+    endpoint: i32,
+    component_id: Option<u32>,
+) -> Result<(String, http::Method), CarbideError> {
+    use ::rpc::forge::RedfishProxyEndpoint;
+
+    let ep = RedfishProxyEndpoint::try_from(endpoint).map_err(|_| {
+        CarbideError::InvalidArgument(format!("unknown RedfishProxyEndpoint value: {endpoint}"))
+    })?;
+
+    let id = component_id.map(|i| i.to_string());
+    let require_id = |label: &str| -> Result<String, CarbideError> {
+        id.clone().ok_or_else(|| {
+            CarbideError::InvalidArgument(format!("component_id is required for {label}"))
+        })
+    };
+
+    let (path, method) = match ep {
+        RedfishProxyEndpoint::Unspecified => {
+            return Err(CarbideError::InvalidArgument(
+                "RedfishProxyEndpoint must not be UNSPECIFIED".to_owned(),
+            ));
+        }
+
+        RedfishProxyEndpoint::GetBmcFirmwareVersion => (
+            "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0".to_owned(),
+            http::Method::GET,
+        ),
+
+        RedfishProxyEndpoint::GetGpuProcessor => (
+            format!(
+                "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_{}",
+                require_id("GET_GPU_PROCESSOR")?
+            ),
+            http::Method::GET,
+        ),
+        RedfishProxyEndpoint::GetGpuEnvironmentMetrics => (
+            format!(
+                "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_{}/EnvironmentMetrics",
+                require_id("GET_GPU_ENVIRONMENT_METRICS")?
+            ),
+            http::Method::GET,
+        ),
+        RedfishProxyEndpoint::SetGpuPowerLimit => (
+            format!(
+                "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_{}/EnvironmentMetrics",
+                require_id("SET_GPU_POWER_LIMIT")?
+            ),
+            http::Method::PATCH,
+        ),
+
+        RedfishProxyEndpoint::GetCpuProcessor => (
+            format!(
+                "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_{}",
+                require_id("GET_CPU_PROCESSOR")?
+            ),
+            http::Method::GET,
+        ),
+        RedfishProxyEndpoint::GetCpuEnvironmentMetrics => (
+            format!(
+                "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_{}/EnvironmentMetrics",
+                require_id("GET_CPU_ENVIRONMENT_METRICS")?
+            ),
+            http::Method::GET,
+        ),
+        RedfishProxyEndpoint::SetCpuPowerLimit => (
+            format!(
+                "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_{}/EnvironmentMetrics",
+                require_id("SET_CPU_POWER_LIMIT")?
+            ),
+            http::Method::PATCH,
+        ),
+
+        RedfishProxyEndpoint::GetChassis => (
+            "/redfish/v1/Chassis/Chassis_0".to_owned(),
+            http::Method::GET,
+        ),
+        RedfishProxyEndpoint::GetChassisEnvironmentMetrics => (
+            "/redfish/v1/Chassis/Chassis_0/EnvironmentMetrics".to_owned(),
+            http::Method::GET,
+        ),
+
+        RedfishProxyEndpoint::GetHgxChassis => (
+            "/redfish/v1/Chassis/HGX_Chassis_0".to_owned(),
+            http::Method::GET,
+        ),
+        RedfishProxyEndpoint::GetHgxChassisEnvironmentMetrics => (
+            "/redfish/v1/Chassis/HGX_Chassis_0/EnvironmentMetrics".to_owned(),
+            http::Method::GET,
+        ),
+
+        RedfishProxyEndpoint::GetProcessorModuleEnvironmentMetrics => (
+            format!(
+                "/redfish/v1/Chassis/HGX_ProcessorModule_{}/EnvironmentMetrics",
+                require_id("GET_PROCESSOR_MODULE_ENVIRONMENT_METRICS")?
+            ),
+            http::Method::GET,
+        ),
+        RedfishProxyEndpoint::SetProcessorModulePowerLimit => (
+            format!(
+                "/redfish/v1/Chassis/HGX_ProcessorModule_{}/EnvironmentMetrics",
+                require_id("SET_PROCESSOR_MODULE_POWER_LIMIT")?
+            ),
+            http::Method::PATCH,
+        ),
+        RedfishProxyEndpoint::GetProcessorModuleAssembly => (
+            format!(
+                "/redfish/v1/Chassis/HGX_ProcessorModule_{}/Assembly",
+                require_id("GET_PROCESSOR_MODULE_ASSEMBLY")?
+            ),
+            http::Method::GET,
+        ),
+
+        RedfishProxyEndpoint::GetHgxBmcManager => (
+            "/redfish/v1/Managers/HGX_BMC_0".to_owned(),
+            http::Method::GET,
+        ),
+    };
+
+    Ok((path, method))
 }
 
 pub async fn redfish_proxy(
@@ -255,23 +345,45 @@ pub async fn redfish_proxy(
 ) -> Result<tonic::Response<::rpc::forge::RedfishProxyResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let method = match request.get_ref().method.to_uppercase().as_str() {
-        "GET" => http::Method::GET,
-        "POST" => http::Method::POST,
-        "PATCH" => http::Method::PATCH,
-        other => {
-            return Err(CarbideError::InvalidArgument(format!(
-                "unsupported redfish proxy method: {other} (must be GET, POST, or PATCH)"
-            ))
-            .into())
+    let inner = request.get_ref();
+
+    // New enum-based path: prefer `endpoint` if set to a non-default value.
+    let (uri, method) = if inner.endpoint != 0 {
+        let (path, method) = resolve_proxy_endpoint(inner.endpoint, inner.component_id)?;
+        let bmc_ip = &inner.bmc_ip;
+        if bmc_ip.is_empty() {
+            return Err(CarbideError::InvalidArgument(
+                "bmc_ip is required when using the endpoint field".to_owned(),
+            )
+            .into());
         }
+        let uri: http::Uri = http::Uri::builder()
+            .scheme("https")
+            .authority(bmc_ip.as_str())
+            .path_and_query(path.as_str())
+            .build()
+            .map_err(|e| CarbideError::internal(format!("building proxy URI: {e}")))?;
+        (uri, method)
+    } else {
+        // Legacy path: raw uri + method strings (deprecated, kept for backward compat).
+        let method = match inner.method.to_uppercase().as_str() {
+            "GET" => http::Method::GET,
+            "POST" => http::Method::POST,
+            "PATCH" => http::Method::PATCH,
+            other => {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "unsupported redfish proxy method: {other} (must be GET, POST, or PATCH)"
+                ))
+                .into());
+            }
+        };
+        let uri: http::Uri = inner
+            .uri
+            .parse()
+            .map_err(|err| CarbideError::internal(format!("Parsing uri failed: {err}")))?;
+        (uri, method)
     };
 
-    let uri: http::Uri = request
-        .get_ref()
-        .uri
-        .parse()
-        .map_err(|err| CarbideError::internal(format!("Parsing uri failed: {err}")))?;
     let uri_path = uri.path().to_owned();
 
     // URI allowlist only applies to POST and PATCH; GET is unrestricted.
@@ -816,8 +928,7 @@ mod tests {
 
     #[test]
     fn uri_allowlist_id_placeholder_matches_any_segment() {
-        let patterns =
-            vec!["/redfish/v1/Managers/BMC/NodeManager/Domains/{id}".to_string()];
+        let patterns = vec!["/redfish/v1/Managers/BMC/NodeManager/Domains/{id}".to_string()];
         assert!(uri_matches_allowlist(
             "/redfish/v1/Managers/BMC/NodeManager/Domains/42",
             &patterns,
@@ -845,8 +956,7 @@ mod tests {
 
     #[test]
     fn uri_allowlist_segment_count_mismatch_rejects() {
-        let patterns =
-            vec!["/redfish/v1/Managers/BMC/NodeManager/Domains/{id}".to_string()];
+        let patterns = vec!["/redfish/v1/Managers/BMC/NodeManager/Domains/{id}".to_string()];
         assert!(!uri_matches_allowlist(
             "/redfish/v1/Managers/BMC/NodeManager/Domains",
             &patterns,
@@ -865,10 +975,7 @@ mod tests {
 
     #[test]
     fn uri_allowlist_multiple_patterns_any_match_suffices() {
-        let patterns = vec![
-            "/redfish/v1/A".to_string(),
-            "/redfish/v1/B".to_string(),
-        ];
+        let patterns = vec!["/redfish/v1/A".to_string(), "/redfish/v1/B".to_string()];
         assert!(uri_matches_allowlist("/redfish/v1/B", &patterns));
         assert!(!uri_matches_allowlist("/redfish/v1/C", &patterns));
     }
@@ -916,37 +1023,29 @@ mod tests {
     fn allowlist_external_user_always_passes() {
         let config = HashMap::new();
         let req = external_user_request(());
-        assert!(check_redfish_proxy_allowlist(
-            &config,
-            &req,
-            "/any/uri",
-            &http::Method::POST,
-        )
-        .is_ok());
+        assert!(
+            check_redfish_proxy_allowlist(&config, &req, "/any/uri", &http::Method::POST,).is_ok()
+        );
     }
 
     #[test]
     fn allowlist_spiffe_allowed_post_uri() {
-        let config = make_config(
-            vec!["/redfish/v1/Managers/BMC/NodeManager/Domains"],
-            vec![],
-        );
+        let config = make_config(vec!["/redfish/v1/Managers/BMC/NodeManager/Domains"], vec![]);
         let req = spiffe_request("power-provisioning-agent", ());
-        assert!(check_redfish_proxy_allowlist(
-            &config,
-            &req,
-            "/redfish/v1/Managers/BMC/NodeManager/Domains",
-            &http::Method::POST,
-        )
-        .is_ok());
+        assert!(
+            check_redfish_proxy_allowlist(
+                &config,
+                &req,
+                "/redfish/v1/Managers/BMC/NodeManager/Domains",
+                &http::Method::POST,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn allowlist_spiffe_denied_post_uri() {
-        let config = make_config(
-            vec!["/redfish/v1/Managers/BMC/NodeManager/Domains"],
-            vec![],
-        );
+        let config = make_config(vec!["/redfish/v1/Managers/BMC/NodeManager/Domains"], vec![]);
         let req = spiffe_request("power-provisioning-agent", ());
         let result = check_redfish_proxy_allowlist(
             &config,
@@ -965,21 +1064,20 @@ mod tests {
             vec!["/redfish/v1/Managers/BMC/NodeManager/Domains/{id}"],
         );
         let req = spiffe_request("power-provisioning-agent", ());
-        assert!(check_redfish_proxy_allowlist(
-            &config,
-            &req,
-            "/redfish/v1/Managers/BMC/NodeManager/Domains/42",
-            &http::Method::PATCH,
-        )
-        .is_ok());
+        assert!(
+            check_redfish_proxy_allowlist(
+                &config,
+                &req,
+                "/redfish/v1/Managers/BMC/NodeManager/Domains/42",
+                &http::Method::PATCH,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn allowlist_post_patterns_not_checked_for_patch() {
-        let config = make_config(
-            vec!["/redfish/v1/Managers/BMC/NodeManager/Domains"],
-            vec![],
-        );
+        let config = make_config(vec!["/redfish/v1/Managers/BMC/NodeManager/Domains"], vec![]);
         let req = spiffe_request("power-provisioning-agent", ());
         let result = check_redfish_proxy_allowlist(
             &config,
@@ -1026,20 +1124,201 @@ mod tests {
     fn allowlist_star_pattern_grants_full_access() {
         let config = make_config(vec!["*"], vec!["*"]);
         let req = spiffe_request("power-provisioning-agent", ());
-        assert!(check_redfish_proxy_allowlist(
-            &config,
-            &req,
-            "/literally/any/path",
-            &http::Method::POST,
-        )
-        .is_ok());
+        assert!(
+            check_redfish_proxy_allowlist(
+                &config,
+                &req,
+                "/literally/any/path",
+                &http::Method::POST,
+            )
+            .is_ok()
+        );
         let req2 = spiffe_request("power-provisioning-agent", ());
-        assert!(check_redfish_proxy_allowlist(
-            &config,
-            &req2,
-            "/literally/any/other/path",
-            &http::Method::PATCH,
+        assert!(
+            check_redfish_proxy_allowlist(
+                &config,
+                &req2,
+                "/literally/any/other/path",
+                &http::Method::PATCH,
+            )
+            .is_ok()
+        );
+    }
+
+    // ── resolve_proxy_endpoint ─────────────────────────────────────────
+
+    use ::rpc::forge::RedfishProxyEndpoint;
+
+    #[test]
+    fn resolve_unspecified_endpoint_is_error() {
+        let result = resolve_proxy_endpoint(RedfishProxyEndpoint::Unspecified as i32, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_unknown_endpoint_value_is_error() {
+        let result = resolve_proxy_endpoint(9999, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_get_bmc_firmware_version() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetBmcFirmwareVersion as i32, None)
+                .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0"
+        );
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_get_gpu_processor_requires_id() {
+        let result =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetGpuProcessor as i32, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_get_gpu_processor_with_id() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetGpuProcessor as i32, Some(3))
+                .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_3"
+        );
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_set_gpu_power_limit_is_patch() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::SetGpuPowerLimit as i32, Some(0))
+                .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0/EnvironmentMetrics"
+        );
+        assert_eq!(method, http::Method::PATCH);
+    }
+
+    #[test]
+    fn resolve_get_cpu_processor_with_id() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetCpuProcessor as i32, Some(1))
+                .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_1"
+        );
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_set_cpu_power_limit_is_patch() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::SetCpuPowerLimit as i32, Some(0))
+                .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_0/EnvironmentMetrics"
+        );
+        assert_eq!(method, http::Method::PATCH);
+    }
+
+    #[test]
+    fn resolve_get_chassis() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetChassis as i32, None).unwrap();
+        assert_eq!(path, "/redfish/v1/Chassis/Chassis_0");
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_get_chassis_environment_metrics() {
+        let (path, method) = resolve_proxy_endpoint(
+            RedfishProxyEndpoint::GetChassisEnvironmentMetrics as i32,
+            None,
         )
-        .is_ok());
+        .unwrap();
+        assert_eq!(path, "/redfish/v1/Chassis/Chassis_0/EnvironmentMetrics");
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_get_hgx_chassis() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetHgxChassis as i32, None).unwrap();
+        assert_eq!(path, "/redfish/v1/Chassis/HGX_Chassis_0");
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_get_hgx_chassis_environment_metrics() {
+        let (path, method) = resolve_proxy_endpoint(
+            RedfishProxyEndpoint::GetHgxChassisEnvironmentMetrics as i32,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/Chassis/HGX_Chassis_0/EnvironmentMetrics"
+        );
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_get_processor_module_env_metrics_requires_id() {
+        let result = resolve_proxy_endpoint(
+            RedfishProxyEndpoint::GetProcessorModuleEnvironmentMetrics as i32,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_set_processor_module_power_limit() {
+        let (path, method) = resolve_proxy_endpoint(
+            RedfishProxyEndpoint::SetProcessorModulePowerLimit as i32,
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/Chassis/HGX_ProcessorModule_1/EnvironmentMetrics"
+        );
+        assert_eq!(method, http::Method::PATCH);
+    }
+
+    #[test]
+    fn resolve_get_processor_module_assembly() {
+        let (path, method) = resolve_proxy_endpoint(
+            RedfishProxyEndpoint::GetProcessorModuleAssembly as i32,
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            "/redfish/v1/Chassis/HGX_ProcessorModule_0/Assembly"
+        );
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_get_hgx_bmc_manager() {
+        let (path, method) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetHgxBmcManager as i32, None)
+                .unwrap();
+        assert_eq!(path, "/redfish/v1/Managers/HGX_BMC_0");
+        assert_eq!(method, http::Method::GET);
+    }
+
+    #[test]
+    fn resolve_ignores_component_id_for_fixed_endpoints() {
+        let (path, _) =
+            resolve_proxy_endpoint(RedfishProxyEndpoint::GetChassis as i32, Some(42)).unwrap();
+        assert_eq!(path, "/redfish/v1/Chassis/Chassis_0");
     }
 }
