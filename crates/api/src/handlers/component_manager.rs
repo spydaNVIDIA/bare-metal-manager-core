@@ -348,6 +348,15 @@ pub(crate) async fn component_power_control(
                     error_result(&id, r.error.unwrap_or_default())
                 }
             }));
+
+            let bmc_ips: Vec<IpAddr> = endpoints
+                .resolved
+                .endpoints
+                .iter()
+                .map(|ep| ep.bmc_ip)
+                .collect();
+            request_re_exploration(api, &bmc_ips).await;
+
             results
         }
         rpc::component_power_control_request::Target::PowerShelfIds(list) => {
@@ -383,6 +392,15 @@ pub(crate) async fn component_power_control(
                     error_result(&id, r.error.unwrap_or_default())
                 }
             }));
+
+            let pmc_ips: Vec<IpAddr> = endpoints
+                .resolved
+                .endpoints
+                .iter()
+                .map(|ep| ep.pmc_ip)
+                .collect();
+            request_re_exploration(api, &pmc_ips).await;
+
             results
         }
         rpc::component_power_control_request::Target::MachineIds(_list) => {
@@ -395,6 +413,30 @@ pub(crate) async fn component_power_control(
     Ok(Response::new(rpc::ComponentPowerControlResponse {
         results,
     }))
+}
+
+/// Best-effort: flag BMC/PMC endpoints for re-exploration so the site
+/// explorer refreshes its cache before `VerifyPowerStatus` polls.
+async fn request_re_exploration(api: &Api, ips: &[IpAddr]) {
+    if ips.is_empty() {
+        return;
+    }
+    match api.txn_begin().await {
+        Ok(mut txn) => {
+            if let Err(e) =
+                db::explored_endpoints::request_exploration_for_addresses(ips, &mut txn).await
+            {
+                tracing::warn!(?e, "failed to request re-exploration after power control");
+                return;
+            }
+            if let Err(e) = txn.commit().await {
+                tracing::warn!(?e, "failed to commit re-exploration request");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(?e, "failed to begin txn for re-exploration request");
+        }
+    }
 }
 
 // ---- Inventory ----
