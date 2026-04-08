@@ -219,28 +219,94 @@ use ::rpc::forge::RedfishProxyEndpoint;
 /// Endpoint-to-URI lookup table. To add a new endpoint, add a proto enum
 /// variant and append one entry here.
 const REDFISH_PROXY_ENDPOINT_TO_URI: &[(RedfishProxyEndpoint, &str)] = &[
-    (RedfishProxyEndpoint::BmcFirmwareVersion,               "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0"),
-    (RedfishProxyEndpoint::Gpu0Processor,                    "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0"),
-    (RedfishProxyEndpoint::Gpu1Processor,                    "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1"),
-    (RedfishProxyEndpoint::Gpu2Processor,                    "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_2"),
-    (RedfishProxyEndpoint::Gpu3Processor,                    "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_3"),
-    (RedfishProxyEndpoint::Gpu0EnvironmentMetrics,           "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::Gpu1EnvironmentMetrics,           "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::Gpu2EnvironmentMetrics,           "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_2/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::Gpu3EnvironmentMetrics,           "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_3/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::Cpu0Processor,                    "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_0"),
-    (RedfishProxyEndpoint::Cpu1Processor,                    "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_1"),
-    (RedfishProxyEndpoint::Cpu0EnvironmentMetrics,           "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_0/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::Cpu1EnvironmentMetrics,           "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_1/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::Chassis,                          "/redfish/v1/Chassis/Chassis_0"),
-    (RedfishProxyEndpoint::ChassisEnvironmentMetrics,        "/redfish/v1/Chassis/Chassis_0/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::HgxChassis,                       "/redfish/v1/Chassis/HGX_Chassis_0"),
-    (RedfishProxyEndpoint::HgxChassisEnvironmentMetrics,     "/redfish/v1/Chassis/HGX_Chassis_0/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::ProcessorModule0EnvironmentMetrics, "/redfish/v1/Chassis/HGX_ProcessorModule_0/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::ProcessorModule1EnvironmentMetrics, "/redfish/v1/Chassis/HGX_ProcessorModule_1/EnvironmentMetrics"),
-    (RedfishProxyEndpoint::ProcessorModule0Assembly,         "/redfish/v1/Chassis/HGX_ProcessorModule_0/Assembly"),
-    (RedfishProxyEndpoint::ProcessorModule1Assembly,         "/redfish/v1/Chassis/HGX_ProcessorModule_1/Assembly"),
-    (RedfishProxyEndpoint::HgxBmcManager,                    "/redfish/v1/Managers/HGX_BMC_0"),
+    (
+        RedfishProxyEndpoint::BmcFirmwareVersion,
+        "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu0Processor,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu1Processor,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu2Processor,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_2",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu3Processor,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_3",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu0EnvironmentMetrics,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu1EnvironmentMetrics,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu2EnvironmentMetrics,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_2/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::Gpu3EnvironmentMetrics,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_3/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::Cpu0Processor,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_0",
+    ),
+    (
+        RedfishProxyEndpoint::Cpu1Processor,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_1",
+    ),
+    (
+        RedfishProxyEndpoint::Cpu0EnvironmentMetrics,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_0/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::Cpu1EnvironmentMetrics,
+        "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_1/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::Chassis,
+        "/redfish/v1/Chassis/Chassis_0",
+    ),
+    (
+        RedfishProxyEndpoint::ChassisEnvironmentMetrics,
+        "/redfish/v1/Chassis/Chassis_0/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::HgxChassis,
+        "/redfish/v1/Chassis/HGX_Chassis_0",
+    ),
+    (
+        RedfishProxyEndpoint::HgxChassisEnvironmentMetrics,
+        "/redfish/v1/Chassis/HGX_Chassis_0/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::ProcessorModule0EnvironmentMetrics,
+        "/redfish/v1/Chassis/HGX_ProcessorModule_0/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::ProcessorModule1EnvironmentMetrics,
+        "/redfish/v1/Chassis/HGX_ProcessorModule_1/EnvironmentMetrics",
+    ),
+    (
+        RedfishProxyEndpoint::ProcessorModule0Assembly,
+        "/redfish/v1/Chassis/HGX_ProcessorModule_0/Assembly",
+    ),
+    (
+        RedfishProxyEndpoint::ProcessorModule1Assembly,
+        "/redfish/v1/Chassis/HGX_ProcessorModule_1/Assembly",
+    ),
+    (
+        RedfishProxyEndpoint::HgxBmcManager,
+        "/redfish/v1/Managers/HGX_BMC_0",
+    ),
 ];
 
 /// Resolves a `RedfishProxyEndpoint` enum value to a Redfish URI path.
@@ -259,9 +325,7 @@ fn resolve_proxy_endpoint(endpoint: i32) -> Result<&'static str, CarbideError> {
         .iter()
         .find(|(e, _)| *e == ep)
         .map(|(_, path)| *path)
-        .ok_or_else(|| {
-            CarbideError::InvalidArgument(format!("no URI mapping for endpoint {ep:?}"))
-        })
+        .ok_or_else(|| CarbideError::InvalidArgument(format!("no URI mapping for endpoint {ep:?}")))
 }
 
 /// Resolves a `RedfishProxyMethod` enum value to an `http::Method`.
@@ -295,9 +359,7 @@ pub async fn redfish_proxy(
 
     let bmc_ip = &inner.bmc_ip;
     if bmc_ip.is_empty() {
-        return Err(
-            CarbideError::InvalidArgument("bmc_ip is required".to_owned()).into(),
-        );
+        return Err(CarbideError::InvalidArgument("bmc_ip is required".to_owned()).into());
     }
     let uri: http::Uri = http::Uri::builder()
         .scheme("https")
@@ -1083,31 +1145,7 @@ mod tests {
 
     #[test]
     fn resolve_all_endpoints() {
-        let cases: &[(RedfishProxyEndpoint, &str)] = &[
-            (RedfishProxyEndpoint::BmcFirmwareVersion, "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0"),
-            (RedfishProxyEndpoint::Gpu0Processor, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0"),
-            (RedfishProxyEndpoint::Gpu1Processor, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1"),
-            (RedfishProxyEndpoint::Gpu2Processor, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_2"),
-            (RedfishProxyEndpoint::Gpu3Processor, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_3"),
-            (RedfishProxyEndpoint::Gpu0EnvironmentMetrics, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::Gpu1EnvironmentMetrics, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::Gpu2EnvironmentMetrics, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_2/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::Gpu3EnvironmentMetrics, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_3/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::Cpu0Processor, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_0"),
-            (RedfishProxyEndpoint::Cpu1Processor, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_1"),
-            (RedfishProxyEndpoint::Cpu0EnvironmentMetrics, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_0/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::Cpu1EnvironmentMetrics, "/redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_1/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::Chassis, "/redfish/v1/Chassis/Chassis_0"),
-            (RedfishProxyEndpoint::ChassisEnvironmentMetrics, "/redfish/v1/Chassis/Chassis_0/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::HgxChassis, "/redfish/v1/Chassis/HGX_Chassis_0"),
-            (RedfishProxyEndpoint::HgxChassisEnvironmentMetrics, "/redfish/v1/Chassis/HGX_Chassis_0/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::ProcessorModule0EnvironmentMetrics, "/redfish/v1/Chassis/HGX_ProcessorModule_0/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::ProcessorModule1EnvironmentMetrics, "/redfish/v1/Chassis/HGX_ProcessorModule_1/EnvironmentMetrics"),
-            (RedfishProxyEndpoint::ProcessorModule0Assembly, "/redfish/v1/Chassis/HGX_ProcessorModule_0/Assembly"),
-            (RedfishProxyEndpoint::ProcessorModule1Assembly, "/redfish/v1/Chassis/HGX_ProcessorModule_1/Assembly"),
-            (RedfishProxyEndpoint::HgxBmcManager, "/redfish/v1/Managers/HGX_BMC_0"),
-        ];
-        for &(ep, expected_path) in cases {
+        for &(ep, expected_path) in REDFISH_PROXY_ENDPOINT_TO_URI {
             let path = resolve_proxy_endpoint(ep as i32).unwrap();
             assert_eq!(path, expected_path, "mismatch for {ep:?}");
         }
