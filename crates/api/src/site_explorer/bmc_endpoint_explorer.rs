@@ -736,17 +736,12 @@ impl EndpointExplorer for BmcEndpointExplorer {
                     }
                 };
 
-                // Lite-On power shelf BMCs use "chassis" as their Chassis ID,
-                // so that's the one we'll need to collect data from (we actually
-                // look at the Manufacturer name).
-                //
-                // TODO(chet): This hack was added for Lite-On power shelves,
-                // but I'd really like to try to at least make it some generic
-                // fallback eventually (although I think Lite-On is working on
-                // a fix on their side).
+                // Lite-On power shelf BMCs don't expose vendor details in the
+                // service root, so we fall back to checking the Manufacturer
+                // field across all Chassis entries.
                 let vendor = self
                     .redfish_client
-                    .probe_vendor_name_from_chassis(bmc_ip_address, username, password, "chassis")
+                    .probe_vendor_name_from_chassis(bmc_ip_address, username, password)
                     .await?;
                 if !vendor.to_lowercase().contains("lite-on") {
                     return Err(e);

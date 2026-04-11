@@ -638,7 +638,6 @@ impl RedfishClient {
         bmc_ip_address: SocketAddr,
         username: String,
         password: String,
-        chassis_id: &str,
     ) -> Result<String, EndpointExplorationError> {
         let client = self
             .create_authenticated_redfish_client(
@@ -648,14 +647,14 @@ impl RedfishClient {
             .await
             .map_err(map_redfish_client_creation_error)?;
 
-        let chassis_all = client.get_chassis_all().await.map_err(map_redfish_error)?;
-        if chassis_all.contains(&chassis_id.to_string()) {
+        let chassis_ids = client.get_chassis_all().await.map_err(map_redfish_error)?;
+        for chassis_id in &chassis_ids {
             let chassis = client
                 .get_chassis(chassis_id)
                 .await
                 .map_err(map_redfish_error)?;
-            if let Some(x) = chassis.manufacturer {
-                return Ok(x);
+            if let Some(manufacturer) = chassis.manufacturer {
+                return Ok(manufacturer);
             }
         }
 
