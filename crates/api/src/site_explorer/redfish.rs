@@ -671,23 +671,18 @@ async fn is_switch(client: &dyn Redfish) -> Result<bool, RedfishError> {
 
 async fn is_powershelf(client: &dyn Redfish) -> Result<bool, RedfishError> {
     let chassis_ids = client.get_chassis_all().await?;
-    if chassis_ids.contains(&"powershelf".to_string()) {
-        return Ok(true);
-    }
-    // Some Lite-On power shelf BMCs use "chassis" as their chassis ID,
-    // so if we failed to find "powershelf" as the chassis ID, fall
-    // back to the other "chassis" chassis ID and check the manufacturer
-    // type.
-    // TODO(chet): This should be able to go away in a later update
-    // of the lite-on firmware.
-    if chassis_ids.contains(&"chassis".to_string())
-        && let Ok(chassis) = client.get_chassis("chassis").await
-        && chassis
-            .manufacturer
-            .as_ref()
-            .is_some_and(|m| m.to_lowercase().contains("lite-on"))
-    {
-        return Ok(true);
+    for chassis_id in &chassis_ids {
+        if chassis_id == "powershelf" {
+            return Ok(true);
+        }
+        if let Ok(chassis) = client.get_chassis(chassis_id).await
+            && chassis
+                .manufacturer
+                .as_ref()
+                .is_some_and(|m| m.to_lowercase().contains("lite-on"))
+        {
+            return Ok(true);
+        }
     }
     Ok(false)
 }

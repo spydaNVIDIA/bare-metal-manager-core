@@ -739,10 +739,17 @@ impl EndpointExplorer for BmcEndpointExplorer {
                 // Lite-On power shelf BMCs don't expose vendor details in the
                 // service root, so we fall back to checking the Manufacturer
                 // field across all Chassis entries.
-                let vendor = self
+                let vendor = match self
                     .redfish_client
                     .probe_vendor_name_from_chassis(bmc_ip_address, username, password)
-                    .await?;
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(chassis_err) => {
+                        tracing::error!(%bmc_ip_address, "Failed to probe vendor from chassis: {chassis_err}");
+                        return Err(e);
+                    }
+                };
                 if !vendor.to_lowercase().contains("lite-on") {
                     return Err(e);
                 }
