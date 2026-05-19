@@ -8038,6 +8038,9 @@ message ComponentPowerControlRequest {
     PowerShelfIdList power_shelf_ids = 3;
   }
   common.SystemPowerControl action = 4;
+  // When true, bypass the state controller and dispatch directly to the
+  // configured HAL backend (NSM, PSM, Redfish, etc.).
+  bool force_direct = 5;
 }
 
 message ComponentPowerControlResponse {

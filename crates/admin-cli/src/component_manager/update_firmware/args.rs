@@ -64,6 +64,12 @@ pub struct SwitchArgs {
         help = "NVLink switch components to update; omit to update all supported components"
     )]
     pub components: Vec<NvSwitchComponentArg>,
+
+    #[clap(
+        long = "force-direct",
+        help = "Bypass the state controller and dispatch directly to the component backend"
+    )]
+    pub force_direct: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -84,6 +90,12 @@ pub struct PowerShelfArgs {
         help = "Power shelf components to update; omit to update all supported components"
     )]
     pub components: Vec<PowerShelfComponentArg>,
+
+    #[clap(
+        long = "force-direct",
+        help = "Bypass the state controller and dispatch directly to the component backend"
+    )]
+    pub force_direct: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -104,6 +116,12 @@ pub struct ComputeTrayArgs {
         help = "Compute tray components to update; omit to update all supported components"
     )]
     pub components: Vec<ComputeTrayComponentArg>,
+
+    #[clap(
+        long = "force-direct",
+        help = "Bypass the state controller and dispatch directly to the component backend"
+    )]
+    pub force_direct: bool,
 }
 
 #[derive(ClapArgs, Debug)]

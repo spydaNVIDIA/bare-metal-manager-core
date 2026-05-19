@@ -1060,6 +1060,7 @@ pub(crate) async fn component_power_control(
     let req = request.into_inner();
 
     let action = map_power_action(req.action)?;
+    let force_direct = req.force_direct;
 
     let target = req
         .target
@@ -1067,6 +1068,12 @@ pub(crate) async fn component_power_control(
 
     let (results, exploration_ips) = match target {
         rpc::component_power_control_request::Target::SwitchIds(list) => {
+            if cm.nv_switch_use_state_controller && !force_direct {
+                // TODO: implement state controller path for switch power control
+                return Err(Status::unimplemented(
+                    "switch power control through the state controller is not yet supported",
+                ));
+            }
             let endpoints = resolve_switch_endpoints(api, &list.ids).await?;
 
             let mut results: Vec<_> = endpoints
@@ -1105,6 +1112,12 @@ pub(crate) async fn component_power_control(
             (results, ips)
         }
         rpc::component_power_control_request::Target::PowerShelfIds(list) => {
+            if cm.power_shelf_use_state_controller && !force_direct {
+                // TODO: implement state controller path for power shelf power control
+                return Err(Status::unimplemented(
+                    "power shelf power control through the state controller is not yet supported",
+                ));
+            }
             let endpoints = resolve_power_shelf_endpoints(api, &list.ids).await?;
 
             let mut results: Vec<_> = endpoints
@@ -1143,7 +1156,7 @@ pub(crate) async fn component_power_control(
             (results, ips)
         }
         rpc::component_power_control_request::Target::MachineIds(list) => {
-            if cm.compute_tray_use_state_controller {
+            if cm.compute_tray_use_state_controller && !force_direct {
                 // TODO: implement state controller path for compute tray power control
                 return Err(Status::unimplemented(
                     "compute tray power control through the state controller is not yet supported",
@@ -1467,6 +1480,7 @@ pub(crate) async fn update_component_firmware(
 ) -> Result<Response<rpc::UpdateComponentFirmwareResponse>, Status> {
     log_request_data_redacted("UpdateComponentFirmwareRequest { redacted }");
     let req = request.into_inner();
+    let force_direct = req.force_direct;
 
     let target = req
         .target
@@ -1668,6 +1682,12 @@ pub(crate) async fn update_component_firmware(
             power_shelf_results = Some(results);
         }
         rpc::update_component_firmware_request::Target::Racks(t) => {
+            if force_direct {
+                // TODO: implement RMS backend direct dispatch for a full rack
+                return Err(Status::invalid_argument(
+                    "force_direct is not supported for rack-level firmware updates",
+                ));
+            }
             let list = t
                 .rack_ids
                 .ok_or_else(|| Status::invalid_argument("rack_ids is required"))?;
