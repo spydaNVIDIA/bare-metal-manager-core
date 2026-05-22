@@ -54,6 +54,7 @@ use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::state_controller::config::IterationConfig;
+use crate::state_controller::rack::config::{RackValidationConfig, RmsConfig};
 
 static BF2_NIC: &str = "24.47.2682";
 static BF2_BMC: &str = "BF-25.10-20";
@@ -553,6 +554,20 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub arm_pxe_boot_url_override: Option<String>,
 
+    /// Vendors for which the state controller should pin the UEFI HTTP boot
+    /// URL on the BMC (via Redfish `HttpBootUri`) in addition to the existing
+    /// DHCP option 67 path. Machines whose BMC vendor is NOT in this list
+    /// continue to rely on carbide-dhcp's option 67 for the URL.
+    ///
+    /// Empty by default — no machines get the BMC-pinned URL until vendors
+    /// are explicitly added here (typically after per-vendor verification on
+    /// real hardware). Adding a vendor that libredfish doesn't yet implement
+    /// (e.g., `Dell` / `Lenovo` until their libredfish impls land) will
+    /// surface a runtime `NotSupported` error; carbide-dhcp option 67 is the
+    /// fallback URL source.
+    #[serde(default)]
+    pub set_http_boot_uri_for_vendors: Vec<BMCVendor>,
+
     /// Alternate API URL for external hosts that cannot resolve
     /// https://carbide-pxe.forge. This be an IP (e.g., "https://10.0.0.1:1079"),
     /// or an externally resolvable hostname (e.g.,
@@ -714,7 +729,7 @@ impl Default for DpfConfig {
 }
 
 fn default_dpf_bfb_url() -> String {
-    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.1-34_25.11_ubuntu-24.04_64k_prod.bfb".to_string()
+    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.2-125_26.02_ubuntu-24.04_64k_prod.bfb".to_string()
 }
 
 fn default_dpf_deployment_name() -> String {
@@ -1017,6 +1032,11 @@ pub struct FnnRoutingProfileConfig {
     #[serde(default)]
     pub accepted_leaks_from_underlay: Vec<PrefixFilterPolicyEntry>,
 
+    /// Prefixes that tenant hosts are allowed to announce
+    /// to the DPU as anycast routes.
+    #[serde(default)]
+    pub allowed_anycast_prefixes: Vec<PrefixFilterPolicyEntry>,
+
     /// Currently controls which profiles a tenant can use
     /// when creating VPCs.  Lower value means broader access.
     /// A tenant can create a VPC with a routing profile of the same or broader access.
@@ -1028,6 +1048,46 @@ pub struct FnnRoutingProfileConfig {
     /// - A tenant with INTERNAL could only create INTERNAL VPCs.
     #[serde(default)]
     pub access_tier: u32,
+}
+
+impl From<&FnnRoutingProfileConfig> for rpc::forge::RoutingProfile {
+    fn from(profile: &FnnRoutingProfileConfig) -> Self {
+        Self {
+            tenant_leak_communities_accepted: profile.tenant_leak_communities_accepted,
+            leak_default_route_from_underlay: profile.leak_default_route_from_underlay,
+            leak_tenant_host_routes_to_underlay: profile.leak_tenant_host_routes_to_underlay,
+            accepted_leaks_from_underlay: profile
+                .accepted_leaks_from_underlay
+                .iter()
+                .map(|entry| rpc::forge::PrefixFilterPolicyEntry {
+                    prefix: entry.prefix.to_string(),
+                })
+                .collect(),
+            allowed_anycast_prefixes: profile
+                .allowed_anycast_prefixes
+                .iter()
+                .map(|entry| rpc::forge::PrefixFilterPolicyEntry {
+                    prefix: entry.prefix.to_string(),
+                })
+                .collect(),
+            route_target_imports: profile
+                .route_target_imports
+                .iter()
+                .map(|route_target| rpc::common::RouteTarget {
+                    asn: route_target.asn,
+                    vni: route_target.vni,
+                })
+                .collect(),
+            route_targets_on_exports: profile
+                .route_targets_on_exports
+                .iter()
+                .map(|route_target| rpc::common::RouteTarget {
+                    asn: route_target.asn,
+                    vni: route_target.vni,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Entries used for prefix-list policies on the DPUS.
@@ -1336,7 +1396,7 @@ impl MachineStateControllerConfig {
     }
 
     pub fn failure_retry_time_default() -> Duration {
-        Duration::minutes(30)
+        Duration::minutes(90)
     }
 
     pub fn dpu_up_threshold_default() -> Duration {
@@ -1679,30 +1739,6 @@ fn default_listen() -> SocketAddr {
 
 fn default_max_database_connections() -> u32 {
     1000
-}
-
-fn default_rms_enforce_tls() -> bool {
-    true
-}
-
-/// Rack Manager Service (RMS) configuration for API connectivity and mTLS.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct RmsConfig {
-    /// URL of the RMS API for rack-level firmware upgrades and power sequencing.
-    pub api_url: Option<String>,
-
-    /// Path to the root CA certificate for TLS verification when connecting to RMS.
-    pub root_ca_path: Option<String>,
-
-    /// Path to the client certificate PEM for mTLS with RMS.
-    pub client_cert: Option<String>,
-
-    /// Path to the client private key PEM for mTLS with RMS.
-    pub client_key: Option<String>,
-
-    /// Enforce TLS when connecting to RMS. Defaults to true.
-    #[serde(default = "default_rms_enforce_tls")]
-    pub enforce_tls: bool,
 }
 
 /// DpuConfig related internal configuration
@@ -2280,35 +2316,6 @@ impl MachineValidationConfig {
     }
 }
 
-/// Configuration for rack-level validation (partition-based
-/// multi-node tests run after firmware upgrade / maintenance).
-///
-/// Example:
-/// ```toml
-/// [rack_validation_config]
-/// enabled = true
-/// run_interval = "60s"
-/// ```
-#[derive(Default, Clone, Debug, Deserialize, Serialize)]
-pub struct RackValidationConfig {
-    /// Enables rack validation testing.
-    #[serde(default)]
-    pub enabled: bool,
-
-    #[serde(
-        default = "RackValidationConfig::default_run_interval",
-        deserialize_with = "deserialize_duration",
-        serialize_with = "as_std_duration"
-    )]
-    pub run_interval: std::time::Duration,
-}
-
-impl RackValidationConfig {
-    const fn default_run_interval() -> std::time::Duration {
-        std::time::Duration::from_secs(60)
-    }
-}
-
 /// The VPC isolation behavior enforced within a site.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2713,6 +2720,12 @@ pub struct VmaasConfig {
     /// Prefixes expected to be publicly routable and used
     /// by traffic-intercept users.
     pub public_prefixes: Vec<Ipv4Network>,
+
+    /// Aggregate prefixes associated with secondary VTEPs. These are used only
+    /// for routing and filtering; IP allocation is provided by the secondary
+    /// VTEP resource pool.
+    #[serde(default)]
+    pub secondary_vtep_aggregate_prefixes: Vec<IpNetwork>,
 
     /// Whether a secondary overlay is expected,
     /// which will require secondary VTEP IPs to be allocated
