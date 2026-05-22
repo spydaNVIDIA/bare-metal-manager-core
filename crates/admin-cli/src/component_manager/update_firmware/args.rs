@@ -60,10 +60,10 @@ pub struct SwitchArgs {
     pub components: Vec<NvSwitchComponentArg>,
 
     #[clap(
-        long = "force-direct",
+        long = "bypass-state-controller",
         help = "Bypass the state controller and dispatch directly to the component backend"
     )]
-    pub force_direct: bool,
+    pub bypass_state_controller: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -83,10 +83,10 @@ pub struct PowerShelfArgs {
     pub components: Vec<PowerShelfComponentArg>,
 
     #[clap(
-        long = "force-direct",
+        long = "bypass-state-controller",
         help = "Bypass the state controller and dispatch directly to the component backend"
     )]
-    pub force_direct: bool,
+    pub bypass_state_controller: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -106,10 +106,10 @@ pub struct ComputeTrayArgs {
     pub components: Vec<ComputeTrayComponentArg>,
 
     #[clap(
-        long = "force-direct",
+        long = "bypass-state-controller",
         help = "Bypass the state controller and dispatch directly to the component backend"
     )]
-    pub force_direct: bool,
+    pub bypass_state_controller: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -126,7 +126,7 @@ impl From<Args> for rpc::forge::UpdateComponentFirmwareRequest {
         match args.target {
             Target::Switch(target) => Self {
                 target_version: target.target_version,
-                force_direct: target.force_direct,
+                bypass_state_controller: target.bypass_state_controller,
                 target: Some(
                     rpc::forge::update_component_firmware_request::Target::Switches(
                         rpc::forge::UpdateSwitchFirmwareTarget {
@@ -144,7 +144,7 @@ impl From<Args> for rpc::forge::UpdateComponentFirmwareRequest {
             },
             Target::PowerShelf(target) => Self {
                 target_version: target.target_version,
-                force_direct: target.force_direct,
+                bypass_state_controller: target.bypass_state_controller,
                 target: Some(
                     rpc::forge::update_component_firmware_request::Target::PowerShelves(
                         rpc::forge::UpdatePowerShelfFirmwareTarget {
@@ -162,7 +162,7 @@ impl From<Args> for rpc::forge::UpdateComponentFirmwareRequest {
             },
             Target::ComputeTray(target) => Self {
                 target_version: target.target_version,
-                force_direct: target.force_direct,
+                bypass_state_controller: target.bypass_state_controller,
                 target: Some(
                     rpc::forge::update_component_firmware_request::Target::ComputeTrays(
                         rpc::forge::UpdateComputeTrayFirmwareTarget {
@@ -180,7 +180,7 @@ impl From<Args> for rpc::forge::UpdateComponentFirmwareRequest {
             },
             Target::Rack(target) => Self {
                 target_version: target.target_version,
-                force_direct: false,
+                bypass_state_controller: false,
                 target: Some(
                     rpc::forge::update_component_firmware_request::Target::Racks(
                         rpc::forge::UpdateRackFirmwareTarget {
