@@ -12820,6 +12820,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "cargo_metadata",
  "clap",
  "eyre",
  "similar 3.1.1",
