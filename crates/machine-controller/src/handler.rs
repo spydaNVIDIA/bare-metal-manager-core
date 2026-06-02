@@ -5224,7 +5224,7 @@ impl StateHandler for HostMachineStateHandler {
                                 Ok(StateHandlerOutcome::transition(next_state))
                             } else {
                                 // The DPU can only come up while the host is
-                                // powered on. 
+                                // powered on.
                                 if is_host_powered_off(mh_snapshot, ctx).await? {
                                     tracing::error!(
                                         machine_id = %mh_snapshot.host_snapshot.id,
