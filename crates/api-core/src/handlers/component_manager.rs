@@ -1618,6 +1618,14 @@ pub(crate) async fn update_component_firmware(
                 ));
             }
 
+            let cm = require_component_manager(api)?;
+            if cm.power_shelf_use_state_controller && !bypass_state_controller {
+                // TODO: implement state controller path for power shelf firmware control
+                return Err(Status::unimplemented(
+                    "power shelf firmware control through the state controller is not yet supported",
+                ));
+            }
+
             reject_power_shelf_firmware_object_json(&access_token)?;
             let cm = require_component_manager(api)?;
             let components = map_power_shelf_components(&t.components)?;
