@@ -1627,7 +1627,6 @@ pub(crate) async fn update_component_firmware(
             }
 
             reject_power_shelf_firmware_object_json(&access_token)?;
-            let cm = require_component_manager(api)?;
             let components = map_power_shelf_components(&t.components)?;
             let endpoints = resolve_power_shelf_endpoints(api, &list.ids).await?;
 
