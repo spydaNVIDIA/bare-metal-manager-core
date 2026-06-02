@@ -8040,7 +8040,7 @@ message ComponentPowerControlRequest {
   common.SystemPowerControl action = 4;
   // When true, bypass the state controller and dispatch directly to the
   // configured HAL backend (NSM, PSM, Redfish, etc.).
-  bool force_direct = 5;
+  bool bypass_state_controller = 5;
 }
 
 message ComponentPowerControlResponse {
@@ -8132,6 +8132,10 @@ message UpdateComponentFirmwareRequest {
   // Rejected for direct dispatch paths and currently unsupported for power shelves.
   optional string access_token = 6;
   bool force_update = 7;
+  // When true, bypass the state controller and dispatch directly to the
+  // configured HAL backend (NSM, PSM, Redfish, etc.).
+  // Not supported for rack-level firmware updates.
+  bool bypass_state_controller = 8;
 }
 
 message UpdateComponentFirmwareResponse {
