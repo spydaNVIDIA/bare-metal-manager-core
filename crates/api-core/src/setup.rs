@@ -568,6 +568,12 @@ pub async fn start_api(
         .await?;
 
         txn.commit().await?;
+
+        // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
+        // site-wide BMC root, so existing sites converge onto the decoupled
+        // lockdown key without operator action. No-op once seeded or if the BMC
+        // root is not yet configured.
+        crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await?;
     };
     let common_pools =
         db::resource_pool::create_common_pools(db_pool.clone(), ib_fabric_ids).await?;
