@@ -130,16 +130,18 @@ impl RedfishClient {
 
         let service_root = client.get_service_root().await.map_err(map_redfish_error)?;
 
-        if service_root.vendor.is_none() {
-            return Err(EndpointExplorationError::MissingVendor);
+        // Do not gate on the raw `Vendor` field: some BMCs (e.g. Supermicro
+        // SYS-121H-TNR) leave ServiceRoot.Vendor null but still identify
+        // themselves via the `Oem` key. libredfish's `vendor()` already
+        // consults Oem as a fallback, so resolve through it and only reject
+        // when the result is genuinely unrecognized. See NVBug 6338388.
+        match service_root.vendor() {
+            Some(vendor) if vendor != RedfishVendor::Unknown => Ok(vendor),
+            _ => {
+                tracing::info!("No recognized vendor for BMC at {bmc_ip_address}");
+                Err(EndpointExplorationError::MissingVendor)
+            }
         }
-
-        let Some(vendor) = service_root.vendor() else {
-            tracing::info!("No vendor found for BMC at {bmc_ip_address}");
-            return Err(EndpointExplorationError::MissingVendor);
-        };
-
-        Ok(vendor)
     }
 
     pub async fn validate_bmc_credentials(
