@@ -469,7 +469,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
     #[allow(clippy::unused_async)]
     async fn handle_locking(
         &self,
-        _monitor: &mut DpaMonitor,
+        monitor: &mut DpaMonitor,
         mh: &ManagedHostStateSnapshot,
         idx: usize,
         _metrics: &mut DpaMonitorMetrics,
@@ -497,11 +497,32 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         };
 
         if cs.lockmode == Some(Locked) {
+            // The card is now locked on the device under the active lockdown IKM
+            // (build_lock_command derived the key from the same site-wide target
+            // version this records). Record lockdown_ikm convergence, keyed by the
+            // card (NIC) MAC, so the rotation engine tracks this card from the
+            // moment it is actually locked. The record is committed atomically
+            // with the state transition below (the monitor reuses this txn to
+            // persist the new controller state). Idempotent: a card already
+            // recorded (by the backfill or a prior lock) is left untouched.
+            let mut txn = monitor
+                .db_services
+                .db_pool
+                .begin()
+                .await
+                .map_err(|e| db::AnnotatedSqlxError::new("handle_locking begin txn", e))?;
+            db::credential_rotation::record_device_converged(
+                txn.as_mut(),
+                dpa_interface.mac_address,
+                db::credential_rotation::CredentialRotationType::LockdownIkm,
+            )
+            .await?;
+
             let new_state = DpaInterfaceControllerState::Assigned;
             tracing::info!(state = ?new_state, "Dpa Interface state transition");
             return Ok(HandlerResult {
                 new_state: Some(new_state),
-                txn: None,
+                txn: Some(txn),
             });
         }
 

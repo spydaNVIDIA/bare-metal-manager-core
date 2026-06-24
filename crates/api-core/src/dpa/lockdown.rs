@@ -25,8 +25,10 @@ use sha2::Sha256;
 use sqlx::PgPool;
 
 // CURRENT_LOCKDOWN_IKM_VERSION is the site-wide lockdown IKM version the
-// lock/unlock flow currently derives keys from. We will leave it hardcoded to 0 until
-// we introduce rotation logic.
+// lock/unlock flow derives keys from, and the version recorded as each card's
+// convergence target. Hardcoded to 0 until the rotation engine lands: rotating
+// the IKM (v0 -> v1) is what advances this, and that logic will own making newly
+// ingested NICs lock under the new IKM while already-locked cards migrate.
 pub const CURRENT_LOCKDOWN_IKM_VERSION: u32 = 0;
 
 // LOCKDOWN_KEY_LENGTH is the max length of the supported
@@ -144,9 +146,9 @@ fn lockdown_ikm_key(version: u32) -> CredentialKey {
     }
 }
 
-// fetch_kdf_secret fetches the IKM for the KDF from the
-// dedicated site-wide lockdown credential, decoupled from the BMC root so the
-// two can be rotated independently.
+// fetch_kdf_secret fetches the IKM for the KDF from the dedicated site-wide
+// lockdown credential, decoupled from the BMC root so the two can be rotated
+// independently.
 async fn fetch_kdf_secret(
     credential_reader: &dyn CredentialReader,
 ) -> Result<String, eyre::Report> {
