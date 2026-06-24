@@ -40,6 +40,21 @@
 //!   gated off, because NICo only copies the operator-provided NVOS credential
 //!   into Vault today; it does not change the switch password (REQ-6,
 //!   set-NVOS-from-factory, is not implemented). The gate flips on with REQ-6.
+//!
+//! Teardown hooks (calling [`delete_device_converged`]) remove a marker when the
+//! credential it tracks is torn down, keeping the table honest:
+//!
+//! * `bmc` -- at `api-core` `delete_bmc_root_credentials_by_mac`, alongside
+//!   deleting the per-device BMC secret from Vault. Once NICo discards the
+//!   secret it can no longer authenticate or rotate, so the marker is meaningless.
+//! * `host_uefi` -- in the `api-core` force-delete path, right after
+//!   `clear_host_uefi_password` resets the password on the device: the host no
+//!   longer carries the site-wide UEFI value, so the marker is false.
+//!
+//! Markers NICo does *not* tear down (the device keeps the site-wide credential,
+//! or NICo keeps the secret) are left to the rotation engine, which must always
+//! join `device_credential_rotation` to the live device tables when selecting
+//! work so a row orphaned by device deletion is never acted on.
 
 use mac_address::MacAddress;
 use sqlx::PgConnection;
@@ -90,15 +105,42 @@ pub async fn record_device_converged(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Deletes the convergence row for `(device_mac, credential_type)`, if present.
+///
+/// Call this when NICo tears down the credential the row tracks -- either by
+/// discarding its only copy (the per-device BMC secret deleted from Vault on
+/// force-delete / `DeleteCredential`) or by changing it back on the device (the
+/// host UEFI password cleared on force-delete). Once the credential the marker
+/// depends on is gone, the marker is false and must not linger for the rotation
+/// engine to act on. Idempotent: deleting a missing row is a no-op.
+pub async fn delete_device_converged(
+    conn: &mut PgConnection,
+    device_mac: MacAddress,
+    credential_type: CredentialRotationType,
+) -> Result<(), DatabaseError> {
+    let query = "DELETE FROM device_credential_rotation \
+                 WHERE device_mac = $1 AND credential_type = $2";
+    sqlx::query(query)
+        .bind(device_mac)
+        .bind(credential_type)
+        .execute(conn)
+        .await
+        .map(|_| ())
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 #[cfg(test)]
 mod tests {
     use mac_address::MacAddress;
-    use sqlx::PgPool;
+    use sqlx::{PgConnection, PgPool};
 
-    use super::{CredentialRotationType, record_device_converged};
+    use super::{CredentialRotationType, delete_device_converged, record_device_converged};
 
-    // current_version for a (mac, type) row, or None if no row exists.
-    async fn version_of(pool: &PgPool, mac: &str, credential_type: &str) -> Option<i32> {
+    // current_version for a (mac, type) row, or None if no row exists. Takes the
+    // same connection the writers use (rather than the pool) so the whole test
+    // runs on a single connection -- otherwise holding that connection across a
+    // second `pool` acquisition trips the txn_held_across_await lint.
+    async fn version_of(conn: &mut PgConnection, mac: &str, credential_type: &str) -> Option<i32> {
         let row: Option<Option<i32>> = sqlx::query_scalar(
             "SELECT current_version FROM device_credential_rotation \
              WHERE device_mac = $1::macaddr \
@@ -106,7 +148,7 @@ mod tests {
         )
         .bind(mac)
         .bind(credential_type)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await
         .unwrap();
         row.flatten()
@@ -123,7 +165,10 @@ mod tests {
         record_device_converged(&mut conn, mac1, CredentialRotationType::Bmc)
             .await
             .unwrap();
-        assert_eq!(version_of(&pool, "02:00:00:00:00:01", "bmc").await, Some(0));
+        assert_eq!(
+            version_of(&mut conn, "02:00:00:00:00:01", "bmc").await,
+            Some(0)
+        );
 
         // Bump the site-wide target. An already-recorded device must NOT be
         // clobbered -- the engine owns version transitions, not this hook.
@@ -131,14 +176,14 @@ mod tests {
             "UPDATE sitewide_credential_rotation SET target_version = 3 \
              WHERE credential_type = 'bmc'",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .unwrap();
         record_device_converged(&mut conn, mac1, CredentialRotationType::Bmc)
             .await
             .unwrap();
         assert_eq!(
-            version_of(&pool, "02:00:00:00:00:01", "bmc").await,
+            version_of(&mut conn, "02:00:00:00:00:01", "bmc").await,
             Some(0),
             "existing row must be preserved on re-ingestion"
         );
@@ -148,7 +193,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            version_of(&pool, "02:00:00:00:00:02", "bmc").await,
+            version_of(&mut conn, "02:00:00:00:00:02", "bmc").await,
             Some(3),
             "a newly ingested device records the current site-wide target"
         );
@@ -159,8 +204,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            version_of(&pool, "02:00:00:00:00:01", "nvos").await,
+            version_of(&mut conn, "02:00:00:00:00:01", "nvos").await,
             Some(0)
         );
+    }
+
+    #[crate::sqlx_test]
+    async fn delete_removes_only_the_targeted_row_and_is_idempotent(pool: PgPool) {
+        let mac: MacAddress = "02:00:00:00:00:01".parse().unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+
+        record_device_converged(&mut conn, mac, CredentialRotationType::Bmc)
+            .await
+            .unwrap();
+        record_device_converged(&mut conn, mac, CredentialRotationType::HostUefi)
+            .await
+            .unwrap();
+
+        // Deleting one credential type leaves the device's other markers intact.
+        delete_device_converged(&mut conn, mac, CredentialRotationType::Bmc)
+            .await
+            .unwrap();
+        assert_eq!(version_of(&mut conn, "02:00:00:00:00:01", "bmc").await, None);
+        assert_eq!(
+            version_of(&mut conn, "02:00:00:00:00:01", "host_uefi").await,
+            Some(0),
+            "deleting bmc must not touch the host_uefi marker"
+        );
+
+        // Deleting a row that no longer exists is a no-op, not an error.
+        delete_device_converged(&mut conn, mac, CredentialRotationType::Bmc)
+            .await
+            .unwrap();
     }
 }

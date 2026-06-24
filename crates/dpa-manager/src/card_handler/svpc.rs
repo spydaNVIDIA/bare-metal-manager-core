@@ -466,7 +466,6 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         apply_profile(dpa_interface)
     }
 
-    #[allow(clippy::unused_async)]
     async fn handle_locking(
         &self,
         monitor: &mut DpaMonitor,
