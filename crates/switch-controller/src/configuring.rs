@@ -86,6 +86,13 @@ async fn handle_rotate_os_password(
     // `update_device_password` to `true`: that branch rotates the password on the
     // switch, stores the resulting NICo-owned credential, and records `nvos`
     // convergence (keyed by BMC MAC) committed atomically with the transition.
+    //
+    // IMPORTANT: before flipping this on, REQ-6 must also seed a
+    // `sitewide_credential_rotation` row for `nvos` (via the backfill migration
+    // or at runtime). `record_device_converged` now requires the site-wide
+    // target to exist and returns `MissingSitewideRotationTarget` otherwise --
+    // unlike the other credential types, nvos has no backfilled row today, so
+    // ungating without seeding it would make every switch fail here.
     let update_device_password = false;
     if update_device_password {
         let mut txn = ctx.services.db_pool.begin().await?;

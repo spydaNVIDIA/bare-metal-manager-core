@@ -14,7 +14,7 @@
 use sqlx::PgPool;
 
 const BACKFILL_MIGRATION: &str =
-    include_str!("../migrations/20260623130000_credential_rotation_backfill.sql");
+    include_str!("../../migrations/20260623130000_credential_rotation_backfill.sql");
 
 const SEGMENT_ID: &str = "20000000-0000-0000-0000-000000000001";
 

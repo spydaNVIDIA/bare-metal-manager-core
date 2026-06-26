@@ -16,7 +16,11 @@ CREATE TABLE sitewide_credential_rotation (
     target_version  integer     NOT NULL,
     started_at      timestamptz NOT NULL DEFAULT now(),
     -- Free-form initiator/reason metadata; must never contain secrets.
-    request_meta    jsonb       NOT NULL DEFAULT '{}'::jsonb
+    request_meta    jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    -- Versions are 0-based (0 = pre-rotation baseline), so the target is
+    -- non-negative by construction.
+    CONSTRAINT sitewide_credential_rotation_target_version_non_negative
+        CHECK (target_version >= 0)
 );
 
 -- One row per (device_mac, credential_type): per-device convergence state.
@@ -38,7 +42,20 @@ CREATE TABLE device_credential_rotation (
     -- Redacted last-error string for observability; never contains secrets.
     rotate_last_error_redacted text,
     rotate_quarantined_until   timestamptz,
-    PRIMARY KEY (device_mac, credential_type)
+    PRIMARY KEY (device_mac, credential_type),
+    -- Version/counter fields are non-negative by construction: versions are
+    -- 0-based and rotate_attempts counts up from 0. These CHECKs are the only
+    -- guard at write time -- manual repairs and the backfill data migration
+    -- bypass the Rust writers -- so they keep the rotation engine from
+    -- reasoning over impossible state. A NULL current_version ("not yet
+    -- established") or rotating_to_version ("no rotation in flight") satisfies
+    -- the CHECK and stays legal.
+    CONSTRAINT device_credential_rotation_current_version_non_negative
+        CHECK (current_version >= 0),
+    CONSTRAINT device_credential_rotation_rotating_to_version_non_negative
+        CHECK (rotating_to_version >= 0),
+    CONSTRAINT device_credential_rotation_rotate_attempts_non_negative
+        CHECK (rotate_attempts >= 0)
 );
 
 -- Hot path: "which devices for this credential type still need rotation"
