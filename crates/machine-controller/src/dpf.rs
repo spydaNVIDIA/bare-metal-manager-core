@@ -210,11 +210,46 @@ impl ResourceLabeler for CarbideDPFLabeler {
 }
 
 /// BMC password provider backed by the Carbide credential manager.
-pub struct CarbideBmcPasswordProvider(Arc<dyn carbide_secrets::credentials::CredentialReader>);
+///
+/// DPF needs a single site-wide BMC password (it has no per-device MAC at this
+/// layer), so this is one of the few legitimate site-wide credential consumers.
+/// It resolves the *current* site-wide version from
+/// `sitewide_credential_rotation.target_version` rather than reading a fixed
+/// unversioned path, so after a rotation it hands DPF the version the fleet has
+/// moved to.
+pub struct CarbideBmcPasswordProvider {
+    credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
+    db_pool: sqlx::PgPool,
+}
 
 impl CarbideBmcPasswordProvider {
-    pub fn new(credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>) -> Self {
-        Self(credential_reader)
+    pub fn new(
+        credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
+        db_pool: sqlx::PgPool,
+    ) -> Self {
+        Self {
+            credential_reader,
+            db_pool,
+        }
+    }
+
+    /// Resolve the live site-wide BMC root version from the rotation table.
+    /// Version 0 (no rotation yet, or no row) maps to the legacy unversioned
+    /// path via [`BmcCredentialType::site_wide_root`].
+    async fn current_sitewide_bmc_version(&self) -> Result<u32, DpfError> {
+        let mut conn = self.db_pool.acquire().await.map_err(|e| {
+            DpfError::InvalidState(format!(
+                "Failed to acquire db connection for BMC rotation target: {e}"
+            ))
+        })?;
+        let target_version = db::credential_rotation::current_target_version(
+            &mut conn,
+            db::credential_rotation::CredentialRotationType::Bmc,
+        )
+        .await
+        .map_err(|e| DpfError::InvalidState(format!("Failed to read BMC rotation target: {e}")))?
+        .unwrap_or(0);
+        Ok(u32::try_from(target_version).unwrap_or(0))
     }
 }
 
@@ -222,10 +257,11 @@ impl CarbideBmcPasswordProvider {
 impl BmcPasswordProvider for CarbideBmcPasswordProvider {
     async fn get_bmc_password(&self) -> Result<String, DpfError> {
         use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+        let version = self.current_sitewide_bmc_version().await?;
         let key = CredentialKey::BmcCredentials {
-            credential_type: BmcCredentialType::SiteWideRoot,
+            credential_type: BmcCredentialType::site_wide_root(version),
         };
-        match self.0.get_credentials(&key).await {
+        match self.credential_reader.get_credentials(&key).await {
             Ok(Some(Credentials::UsernamePassword { password, .. })) => Ok(password),
             Ok(_) => Err(DpfError::InvalidState(
                 "Site wide BMC root credentials not set".into(),

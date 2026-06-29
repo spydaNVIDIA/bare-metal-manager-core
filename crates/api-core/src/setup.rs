@@ -497,7 +497,7 @@ pub async fn start_api(
             .await
             .map_err(|e| eyre::eyre!("Failed to create DPF repository: {e}"))?;
 
-        let provider = CarbideBmcPasswordProvider::new(credential_manager.clone());
+        let provider = CarbideBmcPasswordProvider::new(credential_manager.clone(), db_pool.clone());
 
         let mandatory_services = carbide_config.dpf.resolved_mandatory_services();
         let dpf_mandatory_services = vec![

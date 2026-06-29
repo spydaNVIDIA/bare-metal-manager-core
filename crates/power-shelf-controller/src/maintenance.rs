@@ -262,8 +262,14 @@ async fn lookup_power_shelf_bmc_ip(
         })
 }
 
-/// Resolve BMC root credentials for the given MAC, falling back to the
-/// site-wide root credentials if no per-MAC override exists.
+/// Resolve the per-device BMC root credentials for the given MAC.
+///
+/// Per-device secrets are the authoritative source of truth for a device's BMC
+/// password (every device NICo owns is recorded on the site-wide credential at
+/// ingestion and stamped into its own per-MAC secret). There is deliberately no
+/// site-wide fallback: a missing per-MAC secret means the device has not been
+/// (re)ingested, and silently authenticating with the rotating site-wide
+/// credential would mask that and break once the site rotates.
 async fn lookup_bmc_credentials(
     credential_manager: &dyn CredentialManager,
     bmc_mac: MacAddress,
@@ -273,29 +279,14 @@ async fn lookup_bmc_credentials(
             bmc_mac_address: bmc_mac,
         },
     };
-    let creds = match credential_manager.get_credentials(&bmc_key).await {
-        Ok(Some(creds)) => Some(creds),
-        Ok(None) => None,
-        Err(error) => {
-            return Err(format!(
-                "failed to read BMC credentials for {}: {}",
-                bmc_mac, error
-            ));
-        }
-    };
-
-    match creds {
-        Some(creds) => Ok(creds),
-        None => {
-            let sitewide_key = CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::SiteWideRoot,
-            };
-            credential_manager
-                .get_credentials(&sitewide_key)
-                .await
-                .map_err(|error| format!("failed to read site-wide BMC credentials: {}", error))?
-                .ok_or_else(|| format!("no BMC credentials configured for {} or sitewide", bmc_mac))
-        }
+    match credential_manager.get_credentials(&bmc_key).await {
+        Ok(Some(creds)) => Ok(creds),
+        Ok(None) => Err(format!(
+            "no per-device BMC credentials configured for {bmc_mac}; the device must be (re)ingested"
+        )),
+        Err(error) => Err(format!(
+            "failed to read BMC credentials for {bmc_mac}: {error}"
+        )),
     }
 }
 

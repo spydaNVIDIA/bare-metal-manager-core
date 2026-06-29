@@ -516,9 +516,26 @@ pub(crate) async fn admin_force_delete_machine(
                         }
 
                         if machine.bios_password_set_time.is_some() {
+                            // Authenticate the clear with the host UEFI version the device
+                            // currently carries (table-driven; v0 = the legacy unversioned
+                            // site-default). Best effort: a lookup failure falls back to v0
+                            // rather than aborting the force-delete.
+                            let clear_version = match api.txn_begin().await {
+                                Ok(mut txn) => {
+                                    let version = crate::handlers::uefi::host_uefi_device_version(
+                                        &mut txn,
+                                        bmc_mac_address,
+                                    )
+                                    .await
+                                    .unwrap_or(0);
+                                    let _ = txn.commit().await;
+                                    version
+                                }
+                                Err(_) => 0,
+                            };
                             match api
                                 .redfish_pool
-                                .clear_host_uefi_password(client.as_ref())
+                                .clear_host_uefi_password(client.as_ref(), clear_version)
                                 .await
                             {
                                 Ok(_) => {

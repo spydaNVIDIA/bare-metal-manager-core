@@ -24,6 +24,49 @@ use crate::CarbideError;
 use crate::api::{Api, log_machine_id, log_request_data};
 use crate::handlers::utils::convert_and_log_machine_id;
 
+/// The current site-wide host UEFI target version a device should be driven to,
+/// from `sitewide_credential_rotation.target_version`. Version 0 is the legacy
+/// unversioned site-default path. This is the table-driven "current site-wide
+/// host UEFI credential" resolution used when *setting* the password.
+pub(crate) async fn host_uefi_target_version(
+    conn: &mut sqlx::PgConnection,
+) -> Result<u32, db::DatabaseError> {
+    let version = db::credential_rotation::current_target_version(
+        conn,
+        db::credential_rotation::CredentialRotationType::HostUefi,
+    )
+    .await?
+    .unwrap_or(0);
+    Ok(u32::try_from(version).unwrap_or(0))
+}
+
+/// The host UEFI version a device currently carries, for authenticating against
+/// its existing password when clearing it. Uses the device's converged
+/// `current_version` (which can lag the site target mid-rotation, once the UEFI
+/// rotation engine exists); falls back to the site target, then v0, when the
+/// device has no recorded convergence.
+pub(crate) async fn host_uefi_device_version(
+    conn: &mut sqlx::PgConnection,
+    bmc_mac: mac_address::MacAddress,
+) -> Result<u32, db::DatabaseError> {
+    let version = match db::credential_rotation::device_rotation_status(
+        &mut *conn,
+        db::credential_rotation::CredentialRotationType::HostUefi,
+        bmc_mac,
+    )
+    .await?
+    {
+        Some(status) => status.current_version.unwrap_or(status.target_version),
+        None => db::credential_rotation::current_target_version(
+            &mut *conn,
+            db::credential_rotation::CredentialRotationType::HostUefi,
+        )
+        .await?
+        .unwrap_or(0),
+    };
+    Ok(u32::try_from(version).unwrap_or(0))
+}
+
 pub(crate) async fn clear_host_uefi_password(
     api: &Api,
     request: Request<rpc::ClearHostUefiPasswordRequest>,
@@ -105,6 +148,14 @@ pub(crate) async fn clear_host_uefi_password(
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
             .await?;
 
+    // Resolve the host UEFI version the device currently carries so the clear
+    // authenticates with the right password (table-driven; see
+    // `host_uefi_device_version`). Done before the commit while the txn is open.
+    let clear_version = match snapshot.host_snapshot.bmc_info.mac {
+        Some(mac) => host_uefi_device_version(&mut txn, mac).await?,
+        None => host_uefi_target_version(&mut txn).await?,
+    };
+
     // Don't hold the transaction across an await point
     txn.commit().await?;
 
@@ -123,7 +174,7 @@ pub(crate) async fn clear_host_uefi_password(
 
     let job_id: Option<String> = api
         .redfish_pool
-        .clear_host_uefi_password(redfish_client.as_ref())
+        .clear_host_uefi_password(redfish_client.as_ref(), clear_version)
         .await
         .map_err(|e| {
             tracing::error!(%e, "Failed to run clear_host_uefi_password call");
@@ -209,6 +260,10 @@ pub(crate) async fn set_host_uefi_password(
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
             .await?;
 
+    // Drive the device to the current site-wide host UEFI target (table-driven;
+    // v0 = the legacy unversioned site-default). Resolved before the commit.
+    let target_version = host_uefi_target_version(&mut txn).await?;
+
     // Let txn drop so we don't hold it across a redfish request
     txn.commit().await?;
 
@@ -226,7 +281,7 @@ pub(crate) async fn set_host_uefi_password(
 
     let job_id = api
         .redfish_pool
-        .uefi_setup(redfish_client.as_ref(), false)
+        .uefi_setup(redfish_client.as_ref(), false, target_version)
         .await
         .map_err(|e| {
             tracing::error!(%e, "Failed to run uefi_setup call");

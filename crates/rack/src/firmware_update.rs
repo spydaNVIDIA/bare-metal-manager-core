@@ -200,6 +200,12 @@ async fn switch_endpoint_to_firmware_device_info(
     })
 }
 
+/// Resolve the per-device BMC root credentials for the given MAC.
+///
+/// Per-device secrets are authoritative; there is deliberately no site-wide
+/// fallback. A missing per-MAC secret means the device has not been
+/// (re)ingested, and falling back to the rotating site-wide credential would
+/// mask that and break the moment the site rotates.
 async fn fetch_bmc_credentials(
     credential_manager: &dyn CredentialManager,
     bmc_mac: mac_address::MacAddress,
@@ -210,18 +216,14 @@ async fn fetch_bmc_credentials(
         },
     };
 
-    let creds = match credential_manager.get_credentials(&key).await? {
-        Some(creds) => creds,
-        None => {
-            let sitewide_key = CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::SiteWideRoot,
-            };
-            credential_manager
-                .get_credentials(&sitewide_key)
-                .await?
-                .ok_or_else(|| eyre!("no BMC credentials found for {} or sitewide", bmc_mac))?
-        }
-    };
+    let creds = credential_manager
+        .get_credentials(&key)
+        .await?
+        .ok_or_else(|| {
+            eyre!(
+                "no per-device BMC credentials found for {bmc_mac}; the device must be (re)ingested"
+            )
+        })?;
 
     match creds {
         Credentials::UsernamePassword { username, password } => Ok((username, password)),

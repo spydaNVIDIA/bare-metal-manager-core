@@ -25,6 +25,7 @@ pub mod client_resolution;
 pub mod component_manager;
 pub mod compute_allocation;
 pub mod credential;
+pub mod credential_rotation;
 pub mod db;
 pub mod dns;
 pub mod domain;

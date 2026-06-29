@@ -4371,10 +4371,15 @@ impl DpuMachineStateHandler {
                     )));
                 }
 
+                let dpu_uefi_version = current_site_uefi_target(
+                    &ctx.services.db_pool,
+                    db::credential_rotation::CredentialRotationType::DpuUefi,
+                )
+                .await?;
                 if let Err(e) = ctx
                     .services
                     .redfish_client_pool
-                    .uefi_setup(dpu_redfish_client.as_ref(), true)
+                    .uefi_setup(dpu_redfish_client.as_ref(), true, dpu_uefi_version)
                     .await
                 {
                     let msg = format!(
@@ -5340,6 +5345,26 @@ async fn handle_host_boot_order_setup(
 }
 
 /// TODO: we need to handle the case where the job is deleted for some reason
+/// Resolve the current site-wide UEFI target version (host_uefi or dpu_uefi)
+/// from `sitewide_credential_rotation.target_version` so ingestion drives a
+/// device to the version the fleet has moved to. Version 0 is the legacy
+/// unversioned site-default path. Table-driven, mirroring BMC ingestion.
+async fn current_site_uefi_target(
+    db_pool: &sqlx::PgPool,
+    credential_type: db::credential_rotation::CredentialRotationType,
+) -> Result<u32, StateHandlerError> {
+    let mut conn = db_pool.acquire().await.map_err(|e| {
+        StateHandlerError::GenericError(eyre!(
+            "acquire db connection for uefi rotation target: {e}"
+        ))
+    })?;
+    let version = db::credential_rotation::current_target_version(&mut conn, credential_type)
+        .await
+        .map_err(|e| StateHandlerError::GenericError(eyre!("read uefi rotation target: {e}")))?
+        .unwrap_or(0);
+    Ok(u32::try_from(version).unwrap_or(0))
+}
+
 async fn handle_host_uefi_setup(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &mut ManagedHostStateSnapshot,
@@ -5384,10 +5409,15 @@ async fn handle_host_uefi_setup(
             ))
         }
         UefiSetupState::SetUefiPassword => {
+            let host_uefi_version = current_site_uefi_target(
+                &ctx.services.db_pool,
+                db::credential_rotation::CredentialRotationType::HostUefi,
+            )
+            .await?;
             match ctx
                 .services
                 .redfish_client_pool
-                .uefi_setup(redfish_client.as_ref(), false)
+                .uefi_setup(redfish_client.as_ref(), false, host_uefi_version)
                 .await
             {
                 Ok(job_id) => Ok(StateHandlerOutcome::transition(

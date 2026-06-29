@@ -1473,6 +1473,20 @@ impl Forge for Api {
         crate::handlers::credential::delete_credential(self, request).await
     }
 
+    async fn rotate_credential(
+        &self,
+        request: Request<rpc::RotateCredentialRequest>,
+    ) -> Result<Response<rpc::RotateCredentialResult>, Status> {
+        crate::handlers::credential_rotation::rotate_credential(self, request).await
+    }
+
+    async fn get_credential_rotation_status(
+        &self,
+        request: Request<rpc::CredentialRotationStatusRequest>,
+    ) -> Result<Response<rpc::CredentialRotationStatusResult>, Status> {
+        crate::handlers::credential_rotation::get_credential_rotation_status(self, request).await
+    }
+
     async fn re_wrap_secrets(
         &self,
         request: Request<rpc::ReWrapSecretsRequest>,

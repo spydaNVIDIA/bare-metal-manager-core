@@ -972,6 +972,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "forge.InstanceNetworkAutoConfig",
             "#[derive(serde::Serialize)]",
         )
+        .type_attribute(
+            "forge.RotationCredentialType",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "forge.RotateCredentialResult",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "forge.CredentialRotationStatusResult",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "forge.DeviceCredentialRotationStatus",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .build_server(true)
         .build_client(true)
         .protoc_arg("--experimental_allow_proto3_optional")

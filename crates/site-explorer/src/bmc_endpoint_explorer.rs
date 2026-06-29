@@ -81,9 +81,10 @@ impl BmcEndpointExplorer {
     }
 
     pub async fn get_sitewide_bmc_password(&self) -> Result<String, EndpointExplorationError> {
+        let version = self.current_sitewide_bmc_version().await?;
         let credentials = self
             .credential_client
-            .get_sitewide_bmc_root_credentials()
+            .get_sitewide_bmc_root_credentials(version)
             .await?;
 
         let (_, password) = match credentials {
@@ -91,6 +92,37 @@ impl BmcEndpointExplorer {
         };
 
         Ok(password)
+    }
+
+    /// Resolve which site-wide BMC root version is currently live from
+    /// `sitewide_credential_rotation.target_version`. This is the table-driven
+    /// "current site-wide credential" lookup: rather than reading a fixed
+    /// unversioned alias, ingestion consults the rotation table so a device
+    /// ingested after a rotation lands on the version the fleet moved to (and is
+    /// then recorded at that version by [`Self::set_bmc_root_credentials`]).
+    ///
+    /// Version 0 means "no rotation yet" (the legacy unversioned path). Falls
+    /// back to 0 when there is no database -- only the standalone
+    /// `bmc-explorer-cli` debug tool, which runs against an in-memory store.
+    async fn current_sitewide_bmc_version(&self) -> Result<u32, EndpointExplorationError> {
+        let Some(database_connection) = &self.database_connection else {
+            return Ok(0);
+        };
+        let read_err = |cause: String| EndpointExplorationError::Other {
+            details: format!("failed to read site-wide BMC rotation target: {cause}"),
+        };
+        let mut conn = database_connection
+            .acquire()
+            .await
+            .map_err(|e| read_err(e.to_string()))?;
+        let target_version = db::credential_rotation::current_target_version(
+            &mut conn,
+            db::credential_rotation::CredentialRotationType::Bmc,
+        )
+        .await
+        .map_err(|e| read_err(e.to_string()))?
+        .unwrap_or(0);
+        Ok(u32::try_from(target_version).unwrap_or(0))
     }
 
     fn get_default_hardware_dpu_bmc_root_credentials(&self) -> BmcCredentialsData<'static> {
@@ -313,9 +345,10 @@ impl BmcEndpointExplorer {
             "Attempting sitewide BMC root credentials fallback for possible reingested hardware"
         );
 
+        let version = self.current_sitewide_bmc_version().await?;
         let sitewide_credentials = self
             .credential_client
-            .get_sitewide_bmc_root_credentials()
+            .get_sitewide_bmc_root_credentials(version)
             .await?;
         let Credentials::UsernamePassword { password, .. } = sitewide_credentials;
         let credentials = Credentials::UsernamePassword {
