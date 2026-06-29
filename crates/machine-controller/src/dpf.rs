@@ -234,9 +234,13 @@ impl CarbideBmcPasswordProvider {
     }
 
     /// Resolve the live site-wide BMC root version from the rotation table.
-    /// Version 0 (no rotation yet, or no row) maps to the legacy unversioned
-    /// path via [`BmcCredentialType::site_wide_root`].
+    /// A `target_version` of 0 (no rotation yet) maps to the legacy unversioned
+    /// path via [`BmcCredentialType::site_wide_root`]. A *missing* row is a
+    /// broken/unmigrated database -- the backfill seeds a row at 0 for every
+    /// active type -- and is surfaced as an error rather than silently assuming
+    /// 0, matching the rest of the rotation code.
     async fn current_sitewide_bmc_version(&self) -> Result<u32, DpfError> {
+        // Single read; needs no transaction.
         let mut conn = self.db_pool.acquire().await.map_err(|e| {
             DpfError::InvalidState(format!(
                 "Failed to acquire db connection for BMC rotation target: {e}"
@@ -248,8 +252,23 @@ impl CarbideBmcPasswordProvider {
         )
         .await
         .map_err(|e| DpfError::InvalidState(format!("Failed to read BMC rotation target: {e}")))?
-        .unwrap_or(0);
-        Ok(u32::try_from(target_version).unwrap_or(0))
+        .ok_or_else(|| {
+            DpfError::InvalidState(
+                "No site-wide BMC rotation target row exists; the backfill migration seeds one \
+                 for every active credential type, so a missing row indicates a broken or \
+                 unmigrated database"
+                    .to_string(),
+            )
+        })?;
+        // The column is constrained non-negative, so a failed conversion means a
+        // corrupt value, not "no rotation" -- surface it rather than masking it as
+        // the legacy v0 path.
+        u32::try_from(target_version).map_err(|_| {
+            DpfError::InvalidState(format!(
+                "site-wide BMC rotation target version {target_version} is negative; the column \
+                 is constrained non-negative, so this indicates a corrupt database"
+            ))
+        })
     }
 }
 

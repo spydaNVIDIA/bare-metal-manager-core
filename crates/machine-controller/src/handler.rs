@@ -4371,15 +4371,16 @@ impl DpuMachineStateHandler {
                     )));
                 }
 
-                let dpu_uefi_version = current_site_uefi_target(
+                let dpu_uefi_credentials = resolve_site_uefi_credentials(
                     &ctx.services.db_pool,
+                    ctx.services.redfish_client_pool.credential_reader(),
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 )
                 .await?;
                 if let Err(e) = ctx
                     .services
                     .redfish_client_pool
-                    .uefi_setup(dpu_redfish_client.as_ref(), true, dpu_uefi_version)
+                    .uefi_setup(dpu_redfish_client.as_ref(), true, dpu_uefi_credentials)
                     .await
                 {
                     let msg = format!(
@@ -5365,6 +5366,50 @@ async fn current_site_uefi_target(
     Ok(u32::try_from(version).unwrap_or(0))
 }
 
+/// Resolve the site-wide UEFI credential to set on a device during ingestion:
+/// the secret at the current `host_uefi`/`dpu_uefi` target version. The
+/// low-level `redfish` `uefi_setup` no longer reads the credential store itself,
+/// so we resolve the version (table-driven) and read the credential here.
+///
+/// Takes `db_pool` and `reader` rather than the whole `StateHandlerContext`
+/// because the context is not `Send`/`Sync` and must not be held across an await
+/// in a handler future (`&PgPool` and `&dyn CredentialReader` both are).
+async fn resolve_site_uefi_credentials(
+    db_pool: &sqlx::PgPool,
+    reader: &dyn CredentialReader,
+    credential_type: db::credential_rotation::CredentialRotationType,
+) -> Result<Credentials, StateHandlerError> {
+    let version = current_site_uefi_target(db_pool, credential_type).await?;
+    let key = match credential_type {
+        db::credential_rotation::CredentialRotationType::HostUefi => {
+            CredentialKey::host_uefi_site_default(version)
+        }
+        db::credential_rotation::CredentialRotationType::DpuUefi => {
+            CredentialKey::dpu_uefi_site_default(version)
+        }
+        other => {
+            return Err(StateHandlerError::GenericError(eyre!(
+                "resolve_site_uefi_credentials called with non-UEFI credential type {other:?}"
+            )));
+        }
+    };
+    reader
+        .get_credentials(&key)
+        .await
+        .map_err(|e| {
+            StateHandlerError::GenericError(eyre!(
+                "read site UEFI credential {}: {e}",
+                key.to_key_str()
+            ))
+        })?
+        .ok_or_else(|| {
+            StateHandlerError::GenericError(eyre!(
+                "site UEFI credential {} is not set",
+                key.to_key_str()
+            ))
+        })
+}
+
 async fn handle_host_uefi_setup(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &mut ManagedHostStateSnapshot,
@@ -5409,15 +5454,16 @@ async fn handle_host_uefi_setup(
             ))
         }
         UefiSetupState::SetUefiPassword => {
-            let host_uefi_version = current_site_uefi_target(
+            let host_uefi_credentials = resolve_site_uefi_credentials(
                 &ctx.services.db_pool,
+                ctx.services.redfish_client_pool.credential_reader(),
                 db::credential_rotation::CredentialRotationType::HostUefi,
             )
             .await?;
             match ctx
                 .services
                 .redfish_client_pool
-                .uefi_setup(redfish_client.as_ref(), false, host_uefi_version)
+                .uefi_setup(redfish_client.as_ref(), false, host_uefi_credentials)
                 .await
             {
                 Ok(job_id) => Ok(StateHandlerOutcome::transition(

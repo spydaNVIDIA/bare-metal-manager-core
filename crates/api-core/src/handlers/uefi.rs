@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use db::WithTransaction;
 use futures_util::FutureExt;
 use model::machine::LoadSnapshotOptions;
@@ -28,9 +29,7 @@ use crate::handlers::utils::convert_and_log_machine_id;
 /// from `sitewide_credential_rotation.target_version`. Version 0 is the legacy
 /// unversioned site-default path. This is the table-driven "current site-wide
 /// host UEFI credential" resolution used when *setting* the password.
-pub(crate) async fn host_uefi_target_version(
-    conn: &mut sqlx::PgConnection,
-) -> Result<u32, db::DatabaseError> {
+async fn host_uefi_target_version(conn: &mut sqlx::PgConnection) -> Result<u32, db::DatabaseError> {
     let version = db::credential_rotation::current_target_version(
         conn,
         db::credential_rotation::CredentialRotationType::HostUefi,
@@ -45,7 +44,7 @@ pub(crate) async fn host_uefi_target_version(
 /// `current_version` (which can lag the site target mid-rotation, once the UEFI
 /// rotation engine exists); falls back to the site target, then v0, when the
 /// device has no recorded convergence.
-pub(crate) async fn host_uefi_device_version(
+async fn host_uefi_device_version(
     conn: &mut sqlx::PgConnection,
     bmc_mac: mac_address::MacAddress,
 ) -> Result<u32, db::DatabaseError> {
@@ -65,6 +64,54 @@ pub(crate) async fn host_uefi_device_version(
         .unwrap_or(0),
     };
     Ok(u32::try_from(version).unwrap_or(0))
+}
+
+/// Read the host UEFI credential at `key`, mapping a store error or a missing
+/// secret to a `CarbideError`. Used to resolve the password the low-level
+/// `redfish` UEFI calls apply (they no longer read the store themselves).
+async fn read_uefi_credentials(
+    reader: &dyn CredentialReader,
+    key: &CredentialKey,
+) -> Result<Credentials, CarbideError> {
+    reader
+        .get_credentials(key)
+        .await
+        .map_err(|e| {
+            CarbideError::internal(format!(
+                "failed to read UEFI credential {}: {e}",
+                key.to_key_str()
+            ))
+        })?
+        .ok_or_else(|| {
+            CarbideError::internal(format!("UEFI credential {} is not set", key.to_key_str()))
+        })
+}
+
+/// Resolve the site-wide host UEFI credential to *set* on a device: the secret
+/// at the current `host_uefi` target version (table-driven; v0 = the legacy
+/// unversioned site-default).
+pub(crate) async fn host_uefi_set_credentials(
+    conn: &mut sqlx::PgConnection,
+    reader: &dyn CredentialReader,
+) -> Result<Credentials, CarbideError> {
+    let version = host_uefi_target_version(conn).await.map_err(|e| {
+        CarbideError::internal(format!("failed to read host UEFI target version: {e}"))
+    })?;
+    read_uefi_credentials(reader, &CredentialKey::host_uefi_site_default(version)).await
+}
+
+/// Resolve the host UEFI credential a device currently carries, to authenticate
+/// a *clear* against its existing password (the device's converged version; see
+/// [`host_uefi_device_version`]).
+pub(crate) async fn host_uefi_clear_credentials(
+    conn: &mut sqlx::PgConnection,
+    reader: &dyn CredentialReader,
+    bmc_mac: mac_address::MacAddress,
+) -> Result<Credentials, CarbideError> {
+    let version = host_uefi_device_version(conn, bmc_mac).await.map_err(|e| {
+        CarbideError::internal(format!("failed to read host UEFI device version: {e}"))
+    })?;
+    read_uefi_credentials(reader, &CredentialKey::host_uefi_site_default(version)).await
 }
 
 pub(crate) async fn clear_host_uefi_password(
@@ -148,12 +195,15 @@ pub(crate) async fn clear_host_uefi_password(
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
             .await?;
 
-    // Resolve the host UEFI version the device currently carries so the clear
+    // Resolve the credential the device currently carries so the clear
     // authenticates with the right password (table-driven; see
-    // `host_uefi_device_version`). Done before the commit while the txn is open.
-    let clear_version = match snapshot.host_snapshot.bmc_info.mac {
-        Some(mac) => host_uefi_device_version(&mut txn, mac).await?,
-        None => host_uefi_target_version(&mut txn).await?,
+    // `host_uefi_clear_credentials`). Done before the commit while the txn is
+    // open; falls back to the site target when the BMC MAC is unknown.
+    let clear_credentials = match snapshot.host_snapshot.bmc_info.mac {
+        Some(mac) => {
+            host_uefi_clear_credentials(&mut txn, api.redfish_pool.credential_reader(), mac).await?
+        }
+        None => host_uefi_set_credentials(&mut txn, api.redfish_pool.credential_reader()).await?,
     };
 
     // Don't hold the transaction across an await point
@@ -174,7 +224,7 @@ pub(crate) async fn clear_host_uefi_password(
 
     let job_id: Option<String> = api
         .redfish_pool
-        .clear_host_uefi_password(redfish_client.as_ref(), clear_version)
+        .clear_host_uefi_password(redfish_client.as_ref(), clear_credentials)
         .await
         .map_err(|e| {
             tracing::error!(%e, "Failed to run clear_host_uefi_password call");
@@ -260,9 +310,10 @@ pub(crate) async fn set_host_uefi_password(
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
             .await?;
 
-    // Drive the device to the current site-wide host UEFI target (table-driven;
-    // v0 = the legacy unversioned site-default). Resolved before the commit.
-    let target_version = host_uefi_target_version(&mut txn).await?;
+    // Resolve the site-wide host UEFI credential to set (table-driven; v0 = the
+    // legacy unversioned site-default). Resolved before the commit.
+    let host_uefi_credentials =
+        host_uefi_set_credentials(&mut txn, api.redfish_pool.credential_reader()).await?;
 
     // Let txn drop so we don't hold it across a redfish request
     txn.commit().await?;
@@ -281,7 +332,7 @@ pub(crate) async fn set_host_uefi_password(
 
     let job_id = api
         .redfish_pool
-        .uefi_setup(redfish_client.as_ref(), false, target_version)
+        .uefi_setup(redfish_client.as_ref(), false, host_uefi_credentials)
         .await
         .map_err(|e| {
             tracing::error!(%e, "Failed to run uefi_setup call");

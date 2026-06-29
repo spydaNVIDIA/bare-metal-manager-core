@@ -101,9 +101,13 @@ impl BmcEndpointExplorer {
     /// ingested after a rotation lands on the version the fleet moved to (and is
     /// then recorded at that version by [`Self::set_bmc_root_credentials`]).
     ///
-    /// Version 0 means "no rotation yet" (the legacy unversioned path). Falls
-    /// back to 0 when there is no database -- only the standalone
-    /// `bmc-explorer-cli` debug tool, which runs against an in-memory store.
+    /// A `target_version` of 0 means "no rotation yet" (the legacy unversioned
+    /// path). The backfill migration seeds a row at version 0 for every active
+    /// credential type, so a *missing* row is a broken/unmigrated database and is
+    /// surfaced as an error rather than silently assuming 0 (matching the write
+    /// path in [`Self::set_bmc_root_credentials`] and the rest of the rotation
+    /// code, which never guess a version). The only 0 fallback is the standalone
+    /// `bmc-explorer-cli` debug tool, which has no database at all.
     async fn current_sitewide_bmc_version(&self) -> Result<u32, EndpointExplorationError> {
         let Some(database_connection) = &self.database_connection else {
             return Ok(0);
@@ -111,6 +115,8 @@ impl BmcEndpointExplorer {
         let read_err = |cause: String| EndpointExplorationError::Other {
             details: format!("failed to read site-wide BMC rotation target: {cause}"),
         };
+        // Single read; needs no transaction (the convergence write in
+        // set_bmc_root_credentials uses one because it commits a row).
         let mut conn = database_connection
             .acquire()
             .await
@@ -121,8 +127,23 @@ impl BmcEndpointExplorer {
         )
         .await
         .map_err(|e| read_err(e.to_string()))?
-        .unwrap_or(0);
-        Ok(u32::try_from(target_version).unwrap_or(0))
+        .ok_or_else(|| {
+            read_err(
+                "no site-wide BMC rotation target row exists; the backfill migration seeds one \
+                 for every active credential type, so a missing row indicates a broken or \
+                 unmigrated database"
+                    .to_string(),
+            )
+        })?;
+        // The column is constrained non-negative, so a failed conversion means a
+        // corrupt value, not "no rotation" -- surface it rather than masking it as
+        // the legacy v0 path.
+        u32::try_from(target_version).map_err(|_| {
+            read_err(format!(
+                "site-wide BMC rotation target version {target_version} is negative; the column \
+                 is constrained non-negative, so this indicates a corrupt database"
+            ))
+        })
     }
 
     fn get_default_hardware_dpu_bmc_root_credentials(&self) -> BmcCredentialsData<'static> {

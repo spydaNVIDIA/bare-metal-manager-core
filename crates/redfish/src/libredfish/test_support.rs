@@ -1938,7 +1938,7 @@ impl RedfishClientPool for RedfishSim {
         &self,
         _client: &dyn Redfish,
         _dpu: bool,
-        _site_version: u32,
+        _sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
     ) -> Result<Option<String>, RedfishClientCreationError> {
         Ok(None)
     }
