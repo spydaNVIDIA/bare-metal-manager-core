@@ -402,6 +402,15 @@ service Forge {
   // Delete Credential in Vault
   rpc DeleteCredential(CredentialDeletionRequest) returns (CredentialDeletionResult);
 
+  // Credential rotation
+  // Stage a site-wide credential rotation: write the rotate-TO secret and bump
+  // the site-wide target version. Devices converge to the new version
+  // asynchronously.
+  rpc RotateCredential(RotateCredentialRequest) returns (RotateCredentialResult);
+  // Report convergence of an in-flight (or completed) site-wide rotation.
+  rpc GetCredentialRotationStatus(CredentialRotationStatusRequest)
+      returns (CredentialRotationStatusResult);
+
   // Route Server Management
   rpc GetRouteServers(google.protobuf.Empty) returns (RouteServerEntries);
   rpc AddRouteServers(RouteServers) returns (google.protobuf.Empty);
@@ -1333,6 +1342,98 @@ message CredentialCreationResult {
 
 message CredentialDeletionResult {
 
+}
+
+// Credential family that a site-wide rotation targets. Distinct from
+// CredentialType because rotation is version-addressed and operates per family,
+// not per individual vault path.
+enum RotationCredentialType {
+  // Unset sentinel. The server rejects this with InvalidArgument so a caller
+  // that forgets to set the family never falls through to a destructive
+  // default (proto3 zero value); rotation is too sensitive to guess a target.
+  ROTATION_CREDENTIAL_TYPE_UNSPECIFIED = 0;
+  ROTATION_BMC = 1;
+  ROTATION_HOST_UEFI = 2;
+  ROTATION_DPU_UEFI = 3;
+  ROTATION_NVOS = 4;
+  ROTATION_LOCKDOWN_IKM = 5;
+}
+
+message RotateCredentialRequest {
+  RotationCredentialType credential_type = 1;
+  // Explicit rotate-TO password. Validated against the strength policy and used
+  // verbatim. When omitted, the server auto-generates a strong password.
+  optional string password = 2;
+  // Free-form operator note recorded with the rotation. Must not contain
+  // secrets; it is persisted in the rotation request metadata.
+  optional string reason = 3;
+}
+
+message RotateCredentialResult {
+  RotationCredentialType credential_type = 1;
+  // The newly published site-wide target version devices will converge to.
+  uint32 target_version = 2;
+  // When this rotation was staged.
+  google.protobuf.Timestamp started_at = 3;
+}
+
+message CredentialRotationStatusRequest {
+  RotationCredentialType credential_type = 1;
+  // When set, report only this device's convergence (matched by MAC) instead of
+  // the site-wide aggregate. The count fields in the result then describe just
+  // this one device, and `device` carries the per-device detail. The server
+  // returns NotFound if no rotation record exists for the (MAC, family) pair.
+  optional string device_mac = 2;
+}
+
+// Per-device convergence detail, populated on the result only when the request
+// targeted a specific device by MAC.
+message DeviceCredentialRotationStatus {
+  // The device this status describes.
+  string device_mac = 1;
+  // Credential version currently live on the hardware (the convergence marker).
+  // Unset means "not yet established" (e.g. an unlocked SuperNIC for
+  // lockdown_ikm), which counts as pending.
+  optional uint32 current_version = 2;
+  // Set while a rotation is mid-flight on this device: the version it is being
+  // moved to (the crash-safety marker).
+  optional uint32 rotating_to_version = 3;
+  // True once current_version has reached the site-wide target.
+  bool converged = 4;
+  // True while the device is in a rotation backoff window.
+  bool quarantined = 5;
+  // When the current backoff window expires; set only while quarantined.
+  google.protobuf.Timestamp quarantined_until = 6;
+  // Number of rotation attempts recorded against this device.
+  uint32 rotate_attempts = 7;
+  // When the last rotation attempt ran; unset if none has been recorded.
+  google.protobuf.Timestamp last_attempt_at = 8;
+  // Redacted last-error string for observability; never contains secrets.
+  optional string last_error = 9;
+}
+
+message CredentialRotationStatusResult {
+  // Current site-wide target version for this family.
+  uint32 target_version = 1;
+  // Devices whose recorded version is at or beyond the target. When the request
+  // targeted a single device, this is 0 or 1 for that device.
+  uint64 converged = 2;
+  // Devices not yet converged and eligible for a rotation attempt. When the
+  // request targeted a single device, this is 0 or 1 for that device.
+  uint64 pending = 3;
+  // Devices currently quarantined from rotation attempts. When the request
+  // targeted a single device, this is 0 or 1 for that device.
+  uint64 quarantined = 4;
+  // MAC addresses of the quarantined devices (within the queried set).
+  repeated string quarantined_device_macs = 5;
+  // When the current target version was staged.
+  google.protobuf.Timestamp started_at = 6;
+  // True only when every device in the queried set has reached the target: no
+  // devices pending and none quarantined. Quarantined devices are behind the
+  // target, so a rotation with quarantined devices is not complete.
+  bool complete = 7;
+  // Present only when the request targeted a specific device by MAC.
+  optional DeviceCredentialRotationStatus device = 8;
 }
 
 message VersionRequest {

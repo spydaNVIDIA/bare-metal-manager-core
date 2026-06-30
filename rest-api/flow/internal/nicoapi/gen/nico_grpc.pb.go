@@ -192,6 +192,8 @@ const (
 	Forge_FindNetworkDevicesByDeviceIds_FullMethodName                      = "/forge.Forge/FindNetworkDevicesByDeviceIds"
 	Forge_CreateCredential_FullMethodName                                   = "/forge.Forge/CreateCredential"
 	Forge_DeleteCredential_FullMethodName                                   = "/forge.Forge/DeleteCredential"
+	Forge_RotateCredential_FullMethodName                                   = "/forge.Forge/RotateCredential"
+	Forge_GetCredentialRotationStatus_FullMethodName                        = "/forge.Forge/GetCredentialRotationStatus"
 	Forge_GetRouteServers_FullMethodName                                    = "/forge.Forge/GetRouteServers"
 	Forge_AddRouteServers_FullMethodName                                    = "/forge.Forge/AddRouteServers"
 	Forge_RemoveRouteServers_FullMethodName                                 = "/forge.Forge/RemoveRouteServers"
@@ -780,6 +782,13 @@ type ForgeClient interface {
 	CreateCredential(ctx context.Context, in *CredentialCreationRequest, opts ...grpc.CallOption) (*CredentialCreationResult, error)
 	// Delete Credential in Vault
 	DeleteCredential(ctx context.Context, in *CredentialDeletionRequest, opts ...grpc.CallOption) (*CredentialDeletionResult, error)
+	// Credential rotation
+	// Stage a site-wide credential rotation: write the rotate-TO secret and bump
+	// the site-wide target version. Devices converge to the new version
+	// asynchronously.
+	RotateCredential(ctx context.Context, in *RotateCredentialRequest, opts ...grpc.CallOption) (*RotateCredentialResult, error)
+	// Report convergence of an in-flight (or completed) site-wide rotation.
+	GetCredentialRotationStatus(ctx context.Context, in *CredentialRotationStatusRequest, opts ...grpc.CallOption) (*CredentialRotationStatusResult, error)
 	// Route Server Management
 	GetRouteServers(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*RouteServerEntries, error)
 	AddRouteServers(ctx context.Context, in *RouteServers, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -2955,6 +2964,26 @@ func (c *forgeClient) DeleteCredential(ctx context.Context, in *CredentialDeleti
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CredentialDeletionResult)
 	err := c.cc.Invoke(ctx, Forge_DeleteCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) RotateCredential(ctx context.Context, in *RotateCredentialRequest, opts ...grpc.CallOption) (*RotateCredentialResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RotateCredentialResult)
+	err := c.cc.Invoke(ctx, Forge_RotateCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetCredentialRotationStatus(ctx context.Context, in *CredentialRotationStatusRequest, opts ...grpc.CallOption) (*CredentialRotationStatusResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CredentialRotationStatusResult)
+	err := c.cc.Invoke(ctx, Forge_GetCredentialRotationStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6079,6 +6108,13 @@ type ForgeServer interface {
 	CreateCredential(context.Context, *CredentialCreationRequest) (*CredentialCreationResult, error)
 	// Delete Credential in Vault
 	DeleteCredential(context.Context, *CredentialDeletionRequest) (*CredentialDeletionResult, error)
+	// Credential rotation
+	// Stage a site-wide credential rotation: write the rotate-TO secret and bump
+	// the site-wide target version. Devices converge to the new version
+	// asynchronously.
+	RotateCredential(context.Context, *RotateCredentialRequest) (*RotateCredentialResult, error)
+	// Report convergence of an in-flight (or completed) site-wide rotation.
+	GetCredentialRotationStatus(context.Context, *CredentialRotationStatusRequest) (*CredentialRotationStatusResult, error)
 	// Route Server Management
 	GetRouteServers(context.Context, *emptypb.Empty) (*RouteServerEntries, error)
 	AddRouteServers(context.Context, *RouteServers) (*emptypb.Empty, error)
@@ -7068,6 +7104,12 @@ func (UnimplementedForgeServer) CreateCredential(context.Context, *CredentialCre
 }
 func (UnimplementedForgeServer) DeleteCredential(context.Context, *CredentialDeletionRequest) (*CredentialDeletionResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteCredential not implemented")
+}
+func (UnimplementedForgeServer) RotateCredential(context.Context, *RotateCredentialRequest) (*RotateCredentialResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateCredential not implemented")
+}
+func (UnimplementedForgeServer) GetCredentialRotationStatus(context.Context, *CredentialRotationStatusRequest) (*CredentialRotationStatusResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCredentialRotationStatus not implemented")
 }
 func (UnimplementedForgeServer) GetRouteServers(context.Context, *emptypb.Empty) (*RouteServerEntries, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRouteServers not implemented")
@@ -10970,6 +11012,42 @@ func _Forge_DeleteCredential_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).DeleteCredential(ctx, req.(*CredentialDeletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_RotateCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).RotateCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_RotateCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).RotateCredential(ctx, req.(*RotateCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetCredentialRotationStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CredentialRotationStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetCredentialRotationStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetCredentialRotationStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetCredentialRotationStatus(ctx, req.(*CredentialRotationStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -16703,6 +16781,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteCredential",
 			Handler:    _Forge_DeleteCredential_Handler,
+		},
+		{
+			MethodName: "RotateCredential",
+			Handler:    _Forge_RotateCredential_Handler,
+		},
+		{
+			MethodName: "GetCredentialRotationStatus",
+			Handler:    _Forge_GetCredentialRotationStatus_Handler,
 		},
 		{
 			MethodName: "GetRouteServers",
