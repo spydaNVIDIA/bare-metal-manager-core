@@ -10032,7 +10032,13 @@ async fn wait_for_boss_controller_job_to_complete(
                         // we are waiting for the BOSS volume creation job to complete
                         false,
                     ),
-                    _ => todo!(),
+                    _ => {
+                        return Err(StateHandlerError::GenericError(eyre::eyre!(
+                            "unexpected CreateBossVolume state for {}: {:#?}",
+                            mh_snapshot.host_snapshot.id,
+                            mh_snapshot.host_snapshot.state,
+                        )));
+                    }
                 },
                 _ => {
                     return Err(StateHandlerError::GenericError(eyre::eyre!(
