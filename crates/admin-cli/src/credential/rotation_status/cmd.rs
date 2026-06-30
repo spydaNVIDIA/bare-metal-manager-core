@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use super::args::Args;
 use crate::cfg::runtime::RuntimeConfig;
-use crate::errors::CarbideCliResult;
+use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
 #[derive(Serialize)]
@@ -64,11 +64,14 @@ fn or_dash<T: ToString>(value: &Option<T>) -> String {
 
 // Site-wide aggregate, rendered as a single row. Example `AsciiTable` output:
 //
-//   +------------+--------+-----------+---------+-------------+----------+----------------------+
-//   | Credential | Target | Converged | Pending | Quarantined | Complete | Started              |
-//   +------------+--------+-----------+---------+-------------+----------+----------------------+
-//   | bmc        | 3      | 128       | 4       | 1           | false    | 2026-06-26T19:30:00Z |
-//   +------------+--------+-----------+---------+-------------+----------+----------------------+
+//   +------------+--------+-----------+---------+-------------+----------+----------------------+-------------------+
+//   | Credential | Target | Converged | Pending | Quarantined | Complete | Started              | QuarantinedMacs   |
+//   +------------+--------+-----------+---------+-------------+----------+----------------------+-------------------+
+//   | bmc        | 3      | 128       | 4       | 1           | false    | 2026-06-26T19:30:00Z | 00:11:22:33:44:55 |
+//   +------------+--------+-----------+---------+-------------+----------+----------------------+-------------------+
+//
+// The trailing column lists the quarantined device MACs so the `Quarantined`
+// count is actionable in the table/CSV formats (JSON/YAML carry the same field).
 fn build_status_table(status: &RotationStatusOutput) -> Table {
     let mut table = Table::new();
     table.set_titles(Row::new(vec![
@@ -79,7 +82,14 @@ fn build_status_table(status: &RotationStatusOutput) -> Table {
         Cell::new("Quarantined"),
         Cell::new("Complete"),
         Cell::new("Started"),
+        Cell::new("QuarantinedMacs"),
     ]));
+    // Empty renders as "-" to match the per-device table's optional cells.
+    let quarantined_macs = if status.quarantined_device_macs.is_empty() {
+        "-".to_string()
+    } else {
+        status.quarantined_device_macs.join(", ")
+    };
     table.add_row(prettytable::row![
         status.credential_type,
         status.target_version,
@@ -88,6 +98,7 @@ fn build_status_table(status: &RotationStatusOutput) -> Table {
         status.quarantined,
         status.complete,
         status.started_at,
+        quarantined_macs,
     ]);
     table
 }
@@ -192,7 +203,10 @@ pub async fn rotation_status(
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&output)?),
         OutputFormat::Yaml => println!("{}", serde_yaml::to_string(&output)?),
         OutputFormat::Csv => {
-            table.to_csv(std::io::stdout()).ok();
+            table
+                .to_csv(std::io::stdout())
+                .map_err(CarbideCliError::CsvError)?
+                .flush()?;
         }
         OutputFormat::AsciiTable => table.printstd(),
     }

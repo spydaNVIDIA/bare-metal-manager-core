@@ -54,7 +54,8 @@ use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimTestOverrides};
 use carbide_secrets::credentials::{
-    CompositeCredentialManager, CredentialManager, CredentialReader,
+    CompositeCredentialManager, CredentialKey, CredentialManager, CredentialReader, CredentialType,
+    Credentials,
 };
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_secrets::{ChainedCredentialReader, CredentialSnapshot, UsernamePassword};
@@ -1263,6 +1264,32 @@ pub async fn create_test_env_with_overrides(
     } else {
         Arc::new(RedfishSim::default())
     };
+
+    // Seed the site-wide host and DPU UEFI site-default credentials (version 0).
+    // These are written during site setup in production; tests don't run that.
+    // UEFI setup resolves and reads the site-wide credential in the controller
+    // (`resolve_site_uefi_credentials`) through `redfish_client_pool`'s reader --
+    // which in tests is the `RedfishSim`'s own store -- before calling the
+    // (mocked) `uefi_setup`, so a missing credential surfaces as a hard error.
+    // Seed centrally so every machine-driving test has them regardless of fixture.
+    for key in [
+        CredentialKey::HostUefi {
+            credential_type: CredentialType::SiteDefault,
+        },
+        CredentialKey::DpuUefi {
+            credential_type: CredentialType::SiteDefault,
+        },
+    ] {
+        redfish_sim
+            .seed_credential(
+                &key,
+                &Credentials::UsernamePassword {
+                    username: "".to_string(),
+                    password: "notforprod".to_string(),
+                },
+            )
+            .await;
+    }
 
     let nvlink_for_nmxc_sim = overrides
         .config

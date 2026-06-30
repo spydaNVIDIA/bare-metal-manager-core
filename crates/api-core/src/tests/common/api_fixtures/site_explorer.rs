@@ -1527,6 +1527,9 @@ pub async fn register_expected_machine(
 /// Seeds the vault with the BMC root credential for the host's BMC and every
 /// DPU BMC in the config -- required by anything that reaches a BMC through
 /// the real endpoint explorer.
+///
+/// Site-wide credentials (e.g. the host/DPU UEFI site-default) are seeded
+/// centrally in the `TestEnv` builder, not here, since they are not per-device.
 pub async fn seed_bmc_root_credentials(
     env: &TestEnv,
     config: &ManagedHostConfig,

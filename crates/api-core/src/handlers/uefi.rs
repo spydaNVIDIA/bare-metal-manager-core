@@ -26,44 +26,64 @@ use crate::api::{Api, log_machine_id, log_request_data};
 use crate::handlers::utils::convert_and_log_machine_id;
 
 /// The current site-wide host UEFI target version a device should be driven to,
-/// from `sitewide_credential_rotation.target_version`. Version 0 is the legacy
-/// unversioned site-default path. This is the table-driven "current site-wide
-/// host UEFI credential" resolution used when *setting* the password.
+/// from `sitewide_credential_rotation.target_version`. A stored `target_version`
+/// of 0 is the legacy unversioned site-default baseline; a *missing* row is an
+/// error, since the backfill migration seeds a `host_uefi` row on every site.
+/// This is the table-driven "current site-wide host UEFI credential" resolution
+/// used when *setting* the password.
 async fn host_uefi_target_version(conn: &mut sqlx::PgConnection) -> Result<u32, db::DatabaseError> {
     let version = db::credential_rotation::current_target_version(
         conn,
         db::credential_rotation::CredentialRotationType::HostUefi,
     )
     .await?
-    .unwrap_or(0);
-    Ok(u32::try_from(version).unwrap_or(0))
+    .ok_or_else(|| db::DatabaseError::Internal {
+        message: "no site-wide host_uefi rotation target row exists; the backfill migration \
+                  seeds one for every active credential type, so a missing row indicates a \
+                  broken or unmigrated database"
+            .to_string(),
+    })?;
+    // The column is constrained non-negative, so a failed conversion means a
+    // corrupt value, not "no rotation" -- surface it rather than masking it.
+    u32::try_from(version).map_err(|e| db::DatabaseError::Internal {
+        message: format!("host UEFI target_version {version} is out of range for u32: {e}"),
+    })
 }
 
 /// The host UEFI version a device currently carries, for authenticating against
-/// its existing password when clearing it. Uses the device's converged
+/// its existing password when clearing it. Returns the device's converged
 /// `current_version` (which can lag the site target mid-rotation, once the UEFI
-/// rotation engine exists); falls back to the site target, then v0, when the
-/// device has no recorded convergence.
+/// rotation engine exists), or the site target it was recorded against when
+/// `current_version` is NULL.
+///
+/// The caller must have already confirmed the host's UEFI password is set: a
+/// password-bearing host always has a `host_uefi` convergence row keyed by its
+/// BMC MAC, because NICo writes that row in the same transaction that stamps
+/// `bios_password_set_time` (see `set_host_uefi_password`), and the backfill
+/// seeded one for every pre-existing host with a password. A missing row is
+/// therefore a broken invariant -- error rather than guessing the site target
+/// and authenticating with the wrong password.
 async fn host_uefi_device_version(
     conn: &mut sqlx::PgConnection,
     bmc_mac: mac_address::MacAddress,
 ) -> Result<u32, db::DatabaseError> {
-    let version = match db::credential_rotation::device_rotation_status(
+    let status = db::credential_rotation::device_rotation_status(
         &mut *conn,
         db::credential_rotation::CredentialRotationType::HostUefi,
         bmc_mac,
     )
     .await?
-    {
-        Some(status) => status.current_version.unwrap_or(status.target_version),
-        None => db::credential_rotation::current_target_version(
-            &mut *conn,
-            db::credential_rotation::CredentialRotationType::HostUefi,
-        )
-        .await?
-        .unwrap_or(0),
-    };
-    Ok(u32::try_from(version).unwrap_or(0))
+    .ok_or_else(|| db::DatabaseError::Internal {
+        message: format!(
+            "no host_uefi device_credential_rotation row for BMC MAC {bmc_mac}, but the host's \
+             UEFI password is set; convergence is recorded alongside bios_password_set_time, so a \
+             missing row indicates broken rotation bookkeeping or an unmigrated database"
+        ),
+    })?;
+    let version = status.current_version.unwrap_or(status.target_version);
+    u32::try_from(version).map_err(|e| db::DatabaseError::Internal {
+        message: format!("host UEFI device version {version} is out of range for u32: {e}"),
+    })
 }
 
 /// Read the host UEFI credential at `key`, mapping a store error or a missing
@@ -191,6 +211,16 @@ pub(crate) async fn clear_host_uefi_password(
         CarbideError::InvalidArgument("Specified machine does not have BMC address".into())
     })?;
 
+    // Clearing must authenticate with the password the device currently carries,
+    // which is resolved per-device by BMC MAC. Without the MAC we cannot pick the
+    // right credential, so fail rather than guess the site default and present a
+    // wrong password to the BMC.
+    let bmc_mac = snapshot.host_snapshot.bmc_info.mac.ok_or_else(|| {
+        CarbideError::InvalidArgument(
+            "Specified machine does not have a known BMC MAC address".into(),
+        )
+    })?;
+
     let bmc_access_info =
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
             .await?;
@@ -198,13 +228,10 @@ pub(crate) async fn clear_host_uefi_password(
     // Resolve the credential the device currently carries so the clear
     // authenticates with the right password (table-driven; see
     // `host_uefi_clear_credentials`). Done before the commit while the txn is
-    // open; falls back to the site target when the BMC MAC is unknown.
-    let clear_credentials = match snapshot.host_snapshot.bmc_info.mac {
-        Some(mac) => {
-            host_uefi_clear_credentials(&mut txn, api.redfish_pool.credential_reader(), mac).await?
-        }
-        None => host_uefi_set_credentials(&mut txn, api.redfish_pool.credential_reader()).await?,
-    };
+    // open.
+    let clear_credentials =
+        host_uefi_clear_credentials(&mut txn, api.redfish_pool.credential_reader(), bmc_mac)
+            .await?;
 
     // Don't hold the transaction across an await point
     txn.commit().await?;

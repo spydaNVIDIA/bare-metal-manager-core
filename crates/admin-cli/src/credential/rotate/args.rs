@@ -29,7 +29,7 @@ Rotate the site-wide BMC root password, letting the server auto-generate a stron
     $ nico-admin-cli credential rotate --type=bmc
 
 Rotate the host UEFI password to an explicit value:
-    $ nico-admin-cli credential rotate --type=host-uefi --password=mynewpassword
+    $ nico-admin-cli credential rotate --type=host-uefi --password=Str0ng-Explicit-Pw!
 
 Rotate the SuperNIC lockdown IKM with an audit note:
     $ nico-admin-cli credential rotate --type=lockdown-ikm --reason=\"quarterly rotation\"

@@ -5362,8 +5362,20 @@ async fn current_site_uefi_target(
     let version = db::credential_rotation::current_target_version(&mut conn, credential_type)
         .await
         .map_err(|e| StateHandlerError::GenericError(eyre!("read uefi rotation target: {e}")))?
-        .unwrap_or(0);
-    Ok(u32::try_from(version).unwrap_or(0))
+        .ok_or_else(|| {
+            StateHandlerError::GenericError(eyre!(
+                "no site-wide {credential_type:?} rotation target row exists; the backfill \
+                 migration seeds one for every active credential type, so a missing row \
+                 indicates a broken or unmigrated database"
+            ))
+        })?;
+    // The column is constrained non-negative, so a failed conversion means a
+    // corrupt value, not "no rotation" -- surface it rather than masking it.
+    u32::try_from(version).map_err(|e| {
+        StateHandlerError::GenericError(eyre!(
+            "uefi rotation target_version {version} is out of range for u32: {e}"
+        ))
+    })
 }
 
 /// Resolve the site-wide UEFI credential to set on a device during ingestion:
