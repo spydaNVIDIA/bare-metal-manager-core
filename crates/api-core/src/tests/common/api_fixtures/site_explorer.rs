@@ -1974,6 +1974,23 @@ pub async fn new_switch(
         .await
         .map_err(|e| eyre::eyre!("Failed to create switch: {:?}", e))?;
 
+    // Mirror site-explorer ingestion (switch_creator): link the switch's BMC
+    // machine_interface back to the switch and annotate it `Bmc`, so that
+    // `bmc_info` resolves via the interface link.
+    let bmc_interfaces =
+        db::machine_interface::find_by_mac_address(&mut *txn, expected_switch.bmc_mac_address)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to find BMC machine interface: {:?}", e))?;
+    if let Some(interface) = bmc_interfaces.first() {
+        db::machine_interface::associate_bmc_interface(
+            &interface.id,
+            model::machine_interface_address::MachineInterfaceAssociation::Switch(switch_id),
+            &mut txn,
+        )
+        .await
+        .map_err(|e| eyre::eyre!("Failed to link BMC machine interface: {:?}", e))?;
+    }
+
     txn.commit().await.unwrap();
 
     Ok(switch_id)

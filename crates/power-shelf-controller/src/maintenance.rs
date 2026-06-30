@@ -28,7 +28,6 @@ use db::power_shelf as db_power_shelf;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfMaintenanceOperation};
-use sqlx::PgPool;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -127,7 +126,6 @@ async fn invoke_power_operation(
     let endpoint = match build_power_shelf_endpoint(
         power_shelf_id,
         state,
-        &ctx.services.db_pool,
         ctx.services.credential_manager.as_ref(),
     )
     .await
@@ -213,12 +211,12 @@ async fn invoke_power_operation(
 }
 
 /// Build the `PowerShelfEndpoint` describing this power shelf for component
-/// manager power operations. Resolves the BMC IP from the database and BMC
-/// credentials via the credential manager.
+/// manager power operations. The BMC MAC/IP come from the `bmc_info` carried on
+/// the loaded `PowerShelf` model (resolved by the power-shelf load query); BMC
+/// credentials are resolved via the credential manager.
 pub(super) async fn build_power_shelf_endpoint(
     power_shelf_id: &PowerShelfId,
     state: &PowerShelf,
-    db_pool: &PgPool,
     credential_manager: &dyn CredentialManager,
 ) -> Result<PowerShelfEndpoint, String> {
     let bmc_mac = state.bmc_mac_address.ok_or_else(|| {
@@ -228,38 +226,24 @@ pub(super) async fn build_power_shelf_endpoint(
         )
     })?;
 
-    let bmc_ip = lookup_power_shelf_bmc_ip(db_pool, power_shelf_id, bmc_mac).await?;
-    let credentials = lookup_bmc_credentials(credential_manager, bmc_mac).await?;
-
-    Ok(PowerShelfEndpoint {
-        pmc_ip: bmc_ip
-            .parse()
-            .map_err(|error| format!("invalid BMC IP {bmc_ip}: {error}"))?,
-        pmc_mac: bmc_mac,
-        pmc_vendor: PowerShelfVendor::DEFAULT,
-        pmc_credentials: credentials,
-    })
-}
-
-/// Fetch the power shelf's BMC IP via the underlay machine_interfaces path.
-async fn lookup_power_shelf_bmc_ip(
-    db_pool: &PgPool,
-    power_shelf_id: &PowerShelfId,
-    bmc_mac: MacAddress,
-) -> Result<String, String> {
-    let rows = db_power_shelf::find_bmc_info_by_power_shelf_ids(db_pool, &[*power_shelf_id])
-        .await
-        .map_err(|error| format!("failed to look up BMC info: {}", error))?;
-
-    rows.into_iter()
-        .find(|row| row.power_shelf_id == *power_shelf_id)
-        .map(|row| row.pmc_ip.to_string())
+    let pmc_ip = state
+        .bmc_info
+        .as_ref()
+        .and_then(|info| info.ip)
         .ok_or_else(|| {
             format!(
                 "no BMC IP found for power shelf {} (bmc_mac {})",
                 power_shelf_id, bmc_mac
             )
-        })
+        })?;
+    let credentials = lookup_bmc_credentials(credential_manager, bmc_mac).await?;
+
+    Ok(PowerShelfEndpoint {
+        pmc_ip,
+        pmc_mac: bmc_mac,
+        pmc_vendor: PowerShelfVendor::DEFAULT,
+        pmc_credentials: credentials,
+    })
 }
 
 /// Resolve BMC root credentials for the given MAC, falling back to the

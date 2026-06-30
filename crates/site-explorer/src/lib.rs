@@ -85,7 +85,6 @@ pub use managed_host::is_endpoint_in_managed_host;
 use model::DpuModel;
 use model::expected_machine::DpuMode;
 use model::firmware::FirmwareComponentType;
-use model::machine_interface_address::MachineInterfaceAssociation;
 use model::network_segment::NetworkSegmentType;
 mod switch_creator;
 use carbide_uuid::rack::RackId;
@@ -1102,9 +1101,16 @@ impl SiteExplorer {
             db::machine_interface::find_by_mac_address(&mut *txn, expected_shelf.bmc_mac_address)
                 .await?;
         if let Some(interface) = mi.first() {
-            db::machine_interface::associate_interface_with_machine(
+            // A power shelf's BMC/PMC interface is its management endpoint, so
+            // associate it with the shelf and annotate it as `Bmc` (like
+            // host/switch BMC interfaces), demoting it from primary in one
+            // statement. This `Bmc` link is what lets the power-shelf load query
+            // resolve the shelf's MAC/IP into the `PowerShelf.bmc_info` field.
+            db::machine_interface::associate_bmc_interface(
                 &interface.id,
-                MachineInterfaceAssociation::PowerShelf(power_shelf_id),
+                model::machine_interface_address::MachineInterfaceAssociation::PowerShelf(
+                    power_shelf_id,
+                ),
                 &mut txn,
             )
             .await?;
