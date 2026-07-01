@@ -43,9 +43,9 @@ Specifically, you must complete the following before proceeding:
   | ----- | ----- |
   | 2.9.3 | 2.4.3 |
 
-- Configure the Bluefield-3 device in DPU mode (operating mode). We do not support having DPUs in NIC mode today.
+- Configure the Bluefield-3 device in DPU mode (operating mode). We do not currently support NIC mode.
 - Ensure the DPU ARM OS is booted and reachable via its management interface.
-- Verify that the DPU can connect to the outside world (curl -k https://www.google.com)
+- Verify that the DPU can connect to the outside world (curl -I https://www.google.com)
 
 Refer to the NVIDIA DOCA documentation and the BlueField Firmware Bundle download archive for firmware flashing instructions and supported firmware versions:
 

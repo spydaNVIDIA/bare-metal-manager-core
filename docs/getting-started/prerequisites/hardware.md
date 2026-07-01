@@ -24,11 +24,11 @@ The site controller runs the NICo control plane on a Kubernetes cluster. A minim
 
 ### DPUs on Site Controller (Required)
 
-Today, site-controller nodes must have Bluefield-3 DPUs. Ensure the following requirements are met:
-- Verify the correct DPU power cable has been ordered from the server vendor.
-- The Bluefield-3's operating mode is DPU mode (not NIC mode). Today, NIC mode is not supported.
+Site-controller nodes must have Bluefield-3 DPUs. Ensure the following requirements are met:
+- You have the correct DPU power cable from the server vendor.
+- The Bluefield-3's operating mode is DPU mode. NIC mode is not supported.
 - For BF3 DPUs, verify link speed and optics: BF3 runs at 200 Gb, so match ports to 200 Gb-capable optics, fiber, or DACs.
-- Verify that the DPU can connect to the outside world (curl -k https://www.google.com)
+- Verify that the DPU can connect to the outside world (curl -I https://www.nvidia.com)
 - The DPUs are at the latest supported firmware version: DOCA 2.9.3 and HBN 2.4.3
 
 ## Compute Systems (Managed Hosts)
