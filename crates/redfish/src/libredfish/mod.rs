@@ -295,7 +295,8 @@ pub trait RedfishClientPool: Send + Sync + 'static {
             | RedfishVendor::P3809
             | RedfishVendor::LiteOnPowerShelf
             | RedfishVendor::DeltaPowerShelf
-            | RedfishVendor::NvidiaGBx00 => {
+            | RedfishVendor::NvidiaGBx00
+            | RedfishVendor::VeraRubin => {
                 // change_password does things that require a password and DPUs need a first
                 // password use to be change, so just change it directly
                 //

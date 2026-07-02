@@ -169,6 +169,25 @@ impl RedfishClient {
         Ok(())
     }
 
+    /// Resolve the precise `RedfishVendor` of a BMC using the supplied
+    /// credentials, delegating to the shared `RedfishClientPool` probe (an
+    /// anonymous service-root read with a credentialed chassis-manufacturer
+    /// fallback for BMCs that don't populate the service-root vendor).
+    pub async fn probe_bmc_vendor(
+        &self,
+        bmc_ip_address: SocketAddr,
+        credentials: Credentials,
+    ) -> Result<RedfishVendor, EndpointExplorationError> {
+        self.redfish_client_pool
+            .probe_bmc_vendor(
+                &bmc_ip_address.ip().to_string(),
+                Some(bmc_ip_address.port()),
+                credentials,
+            )
+            .await
+            .map_err(map_redfish_client_creation_error)
+    }
+
     pub async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
