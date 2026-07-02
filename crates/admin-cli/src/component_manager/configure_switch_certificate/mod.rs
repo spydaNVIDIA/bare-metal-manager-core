@@ -15,22 +15,18 @@
  * limitations under the License.
  */
 
-//! State Controller implementation for Switches.
+pub mod args;
+pub mod cmd;
 
-pub mod bom_validating;
-pub mod certificate;
-pub mod configuring;
-pub mod context;
-pub mod created;
-pub mod deleting;
-pub mod endpoint;
-pub mod error_state;
-pub mod fetch_info;
-pub mod handler;
-pub mod initializing;
-pub mod io;
-pub mod maintenance;
-pub mod metrics;
-pub mod ready;
-pub mod reprovisioning;
-pub mod validating;
+pub use args::Args;
+
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
+use crate::errors::CarbideCliResult;
+
+impl Run for Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::configure_switch_certificate(self, ctx.config.format, &ctx.api_client).await?;
+        Ok(())
+    }
+}
