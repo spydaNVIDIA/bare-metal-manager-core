@@ -36,7 +36,7 @@ use tokio::net::lookup_host;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
-use crate::api::{Api, log_machine_id, log_request_data};
+use crate::api::{Api, log_machine_id, log_request_data, log_request_data_redacted};
 
 /// Resolve the boot interface an admin Redfish action should target, the same
 /// way the machine-controller resolves it.
@@ -989,7 +989,15 @@ pub(crate) async fn set_bmc_root_password(
     api: &Api,
     request: Request<rpc::SetBmcRootPasswordRequest>,
 ) -> Result<Response<rpc::SetBmcRootPasswordResponse>, Status> {
-    log_request_data(&request);
+    // Redact: the request carries the plaintext BMC root password. Log only the
+    // non-secret targeting fields.
+    {
+        let r = request.get_ref();
+        log_request_data_redacted(format!(
+            "SetBmcRootPasswordRequest {{ bmc_endpoint_request: {:?}, machine_id: {:?}, new_password: <redacted> }}",
+            r.bmc_endpoint_request, r.machine_id,
+        ));
+    }
     let req = request.into_inner();
 
     let machine_id = req
