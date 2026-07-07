@@ -21,9 +21,11 @@ use std::fmt;
 use carbide_network::BaseMac;
 use itertools::Itertools;
 use mac_address::MacAddress;
-use model::site_explorer::{Chassis, PowerState as ModelPowerState};
+use model::site_explorer::{
+    Chassis, ComputerSystem as ModelComputerSystem, PowerState as ModelPowerState,
+};
 use nv_redfish::assembly::Model as AssemblyModel;
-use nv_redfish::chassis::Chassis as NvChassis;
+use nv_redfish::chassis::{Chassis as NvChassis, PowerSupply as NvPowerSupply};
 use nv_redfish::core::ODataId;
 use nv_redfish::hardware_id::{Manufacturer, Model};
 use nv_redfish::pcie_device::PcieDevice;
@@ -108,6 +110,83 @@ impl<B: Bmc> ExploredChassisCollection<B> {
                 .as_ref()
                 .map(|v| LiteOnSuppliesState(v))
         })
+    }
+
+    /// Detects a Delta power shelf. Delta BMCs expose neither a `Vendor` in the
+    /// service root nor a `/redfish/v1/Systems` collection, so classification
+    /// relies on a Delta manufacturer on the power-shelf chassis (id "chassis"
+    /// or "powershelf"). The manufacturer gate is what distinguishes Delta from
+    /// the Lite-On power shelf, which shares the generic "powershelf" chassis
+    /// id.
+    pub fn is_delta_powershelf(&self) -> bool {
+        self.members.iter().any(|m| {
+            let id = m.chassis.id().into_inner();
+            (id == "chassis" || id == "powershelf")
+                && m.chassis
+                    .hardware_id()
+                    .manufacturer
+                    .as_ref()
+                    .is_some_and(|mfg| mfg.as_ref().to_lowercase().contains("delta"))
+        })
+    }
+
+    /// Aggregate power state across all Delta PSUs found on the chassis members.
+    /// Delta reports commanded PSU on/off state under
+    /// `Oem.deltaenergysystems.Power`.
+    pub fn delta_power_state(&self) -> ModelPowerState {
+        let supplies: Vec<&DeltaPowerSupply> = self
+            .members
+            .iter()
+            .filter_map(|m| m.oem_delta_power_supplies.as_ref())
+            .flatten()
+            .collect();
+
+        let state = powershelf_power_state(supplies.iter().map(|ps| ps.power_state));
+        if state == ModelPowerState::Unknown && !supplies.is_empty() {
+            let detail = supplies
+                .iter()
+                .map(|ps| format!("{}:{:?}", ps.id, ps.power_state))
+                .join(", ");
+            tracing::warn!("Delta power shelf power state is unknown: {detail}");
+        }
+        state
+    }
+
+    /// Synthesizes a [`ModelComputerSystem`] for a power shelf that does not
+    /// expose a Redfish `ComputerSystem`. Identity is taken from the primary
+    /// power-shelf chassis member (mirrors the libredfish Delta path).
+    pub fn synthesized_powershelf_system(&self) -> ModelComputerSystem {
+        let member = self
+            .members
+            .iter()
+            .find(|m| {
+                let id = m.chassis.id().into_inner();
+                id == "chassis" || id == "powershelf"
+            })
+            .or_else(|| self.members.first());
+
+        let (id, manufacturer, model, serial_number) = member
+            .map(|m| {
+                let hw_id = m.chassis.hardware_id();
+                (
+                    m.chassis.id().to_string(),
+                    hw_id.manufacturer.map(|v| v.to_string()),
+                    hw_id.model.map(|v| v.to_string()),
+                    hw_id
+                        .serial_number
+                        .map(|v| v.to_string().trim().to_string()),
+                )
+            })
+            .unwrap_or_default();
+
+        ModelComputerSystem {
+            id,
+            manufacturer,
+            model,
+            serial_number,
+            power_state: self.delta_power_state(),
+            ..Default::default()
+        }
     }
 
     pub fn is_gb300(&self) -> bool {
@@ -235,6 +314,7 @@ pub struct ExploredChassis<B: Bmc> {
     pub network_adapters: ExploredNetworkAdapterCollection<B>,
     pub assembly_sn: Option<String>,
     pub oem_liteon_power_supplies: Option<Vec<LiteOnPowerSupply>>,
+    pub oem_delta_power_supplies: Option<Vec<DeltaPowerSupply>>,
 }
 
 impl<B: Bmc> ExploredChassis<B> {
@@ -290,11 +370,38 @@ impl<B: Bmc> ExploredChassis<B> {
             None
         };
 
+        // Delta power shelves carry the commanded PSU on/off state as an OEM
+        // extension (`Oem.deltaenergysystems.Power`) on the standard
+        // PowerSubsystem power supplies. Only fetch it for Delta chassis to
+        // avoid extra requests on unrelated hardware.
+        let oem_delta_power_supplies = if chassis
+            .hardware_id()
+            .manufacturer
+            .as_ref()
+            .is_some_and(|mfg| mfg.as_ref().to_lowercase().contains("delta"))
+        {
+            let supplies = chassis
+                .power_supplies()
+                .await
+                .map_err(Error::nv_redfish("Delta power supplies"))?;
+            let power_supplies = supplies
+                .iter()
+                .map(|ps| DeltaPowerSupply {
+                    id: ps.id().to_string(),
+                    power_state: delta_psu_power_on(ps),
+                })
+                .collect();
+            Some(power_supplies)
+        } else {
+            None
+        };
+
         Ok(Self {
             chassis,
             network_adapters,
             assembly_sn,
             oem_liteon_power_supplies,
+            oem_delta_power_supplies,
         })
     }
 
@@ -346,6 +453,53 @@ pub struct LiteOnPowerSupply {
     pub power_state: Option<bool>,
 }
 
+pub struct DeltaPowerSupply {
+    pub id: String,
+    pub power_state: Option<bool>,
+}
+
+/// Reads a Delta PSU's commanded on/off state from its OEM extension.
+///
+/// Delta power shelves report this as `Oem.deltaenergysystems.Power` (a bool)
+/// on the standard `PowerSupply` resource. nv-redfish keeps unrecognized OEM
+/// payloads as raw JSON on the resource, so we read it directly rather than
+/// through a typed accessor. Returns `None` when the field is absent.
+fn delta_psu_power_on<B: Bmc>(ps: &NvPowerSupply<B>) -> Option<bool> {
+    delta_power_from_oem(
+        ps.raw()
+            .base
+            .base
+            .oem
+            .as_ref()
+            .map(|oem| &oem.additional_properties),
+    )
+}
+
+/// Extracts `deltaenergysystems.Power` from a PSU's raw OEM object (the value
+/// of the resource's `Oem` property). Split out so the JSON shape can be
+/// exercised in unit tests without a live BMC.
+fn delta_power_from_oem(oem: Option<&serde_json::Value>) -> Option<bool> {
+    oem?.get("deltaenergysystems")?.get("Power")?.as_bool()
+}
+
+/// Aggregates per-PSU commanded on/off states into a single power-shelf state.
+///
+/// All PSUs reporting `Some(true)` means the shelf is on; all `Some(false)`
+/// means off. An empty set, a mix, or any `None` yields `Unknown`.
+fn powershelf_power_state(states: impl Iterator<Item = Option<bool>>) -> ModelPowerState {
+    let states: Vec<Option<bool>> = states.collect();
+    if states.is_empty() {
+        return ModelPowerState::Unknown;
+    }
+    if states.iter().all(|v| *v == Some(true)) {
+        ModelPowerState::On
+    } else if states.iter().all(|v| *v == Some(false)) {
+        ModelPowerState::Off
+    } else {
+        ModelPowerState::Unknown
+    }
+}
+
 pub struct LiteOnSuppliesState<'a>(&'a [LiteOnPowerSupply]);
 
 impl fmt::Display for LiteOnSuppliesState<'_> {
@@ -373,6 +527,69 @@ impl LiteOnSuppliesState<'_> {
         } else {
             tracing::warn!("powershelf power state is unknown: {self}");
             ModelPowerState::Unknown
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{ModelPowerState, delta_power_from_oem, powershelf_power_state};
+
+    // delta_power_from_oem reads Oem.deltaenergysystems.Power (a bool) off a
+    // PSU. The JSON mirrors the shape Delta BMCs serve at
+    // /redfish/v1/Chassis/chassis/PowerSubsystem/PowerSupplies/N.
+    #[test]
+    fn delta_power_from_oem_reads_power_flag() {
+        let on = json!({
+            "deltaenergysystems": {
+                "@odata.type": "#DeltaEnergySystemsPowerSupply.v1_0_0.PowerSupply",
+                "FanSpeedTarget": 0,
+                "Power": true
+            }
+        });
+        let off = json!({ "deltaenergysystems": { "Power": false } });
+
+        assert_eq!(delta_power_from_oem(Some(&on)), Some(true));
+        assert_eq!(delta_power_from_oem(Some(&off)), Some(false));
+        // Missing OEM object, missing vendor key, missing/non-bool Power field
+        // all resolve to None rather than a wrong reading.
+        assert_eq!(delta_power_from_oem(None), None);
+        assert_eq!(delta_power_from_oem(Some(&json!({}))), None);
+        assert_eq!(
+            delta_power_from_oem(Some(&json!({ "deltaenergysystems": {} }))),
+            None
+        );
+        assert_eq!(
+            delta_power_from_oem(Some(&json!({ "deltaenergysystems": { "Power": "true" } }))),
+            None
+        );
+        // Only the Delta vendor key counts; a foreign OEM payload is ignored.
+        assert_eq!(
+            delta_power_from_oem(Some(&json!({ "liteon": { "Power": true } }))),
+            None
+        );
+    }
+
+    // powershelf_power_state collapses per-PSU flags: all-on => On, all-off =>
+    // Off, and empty / mixed / unknown => Unknown.
+    #[test]
+    fn powershelf_power_state_aggregates_psu_flags() {
+        let cases: [(&[Option<bool>], ModelPowerState); 6] = [
+            (&[], ModelPowerState::Unknown),
+            (&[Some(true), Some(true)], ModelPowerState::On),
+            (&[Some(false), Some(false)], ModelPowerState::Off),
+            (&[Some(true), Some(false)], ModelPowerState::Unknown),
+            (&[Some(true), None], ModelPowerState::Unknown),
+            (&[None], ModelPowerState::Unknown),
+        ];
+        for (states, expected) in cases {
+            assert_eq!(
+                powershelf_power_state(states.iter().copied()),
+                expected,
+                "states: {states:?}"
+            );
         }
     }
 }
