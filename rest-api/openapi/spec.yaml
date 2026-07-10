@@ -897,6 +897,11 @@ paths:
           name: includeMachineStats
           description: Include a breakdown of Machine counts by lifecycle status and health. Requires Provider Admin role.
         - schema:
+            type: boolean
+          in: query
+          name: includeGpuStats
+          description: Include a per-Site breakdown of GPU counts grouped by GPU type. Requires Provider Admin role.
+        - schema:
             type: string
           in: query
           name: query
@@ -14533,6 +14538,10 @@ components:
               allocatedInUse: 3
               allocatedNotInUse: 3
               unallocated: 5
+          gpuStats:
+            - name: NVIDIA GB200
+              gpus: 64
+              machines: 16
           capabilities:
             nativeNetworking: true
             networkSecurityGroup: true
@@ -14653,6 +14662,11 @@ components:
         machineStats:
           $ref: '#/components/schemas/SiteMachineStats'
           description: 'Machine counts by status for the Site'
+        gpuStats:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineGPUStats'
+          description: 'GPU counts grouped by GPU type for the Site. Populated when includeGpuStats is set'
     SiteSummary:
       title: SiteSummary
       type: object
@@ -24171,6 +24185,13 @@ components:
         machines:
           type: integer
           description: Number of machines that have this GPU capability
+      examples:
+        - name: NVIDIA GB200
+          gpus: 64
+          machines: 16
+        - name: NVIDIA H100
+          gpus: 8
+          machines: 1
     MachineStatusBreakdown:
       title: MachineStatusBreakdown
       description: Machine counts broken down by status
