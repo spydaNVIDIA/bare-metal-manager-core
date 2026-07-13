@@ -120,13 +120,14 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     /// id.
     pub fn is_delta_powershelf(&self) -> bool {
         self.members.iter().any(|m| {
-            let id = m.chassis.id().into_inner();
-            (id == "chassis" || id == "powershelf")
-                && m.chassis
+            is_delta_powershelf_chassis(
+                m.chassis.id().into_inner(),
+                m.chassis
                     .hardware_id()
                     .manufacturer
                     .as_ref()
-                    .is_some_and(|mfg| mfg.as_ref().to_lowercase().contains("delta"))
+                    .map(|mfg| **mfg),
+            )
         })
     }
 
@@ -461,25 +462,28 @@ pub struct DeltaPowerSupply {
 /// Reads a Delta PSU's commanded on/off state from its OEM extension.
 ///
 /// Delta power shelves report this as `Oem.deltaenergysystems.Power` (a bool)
-/// on the standard `PowerSupply` resource. nv-redfish keeps unrecognized OEM
-/// payloads as raw JSON on the resource, so we read it directly rather than
-/// through a typed accessor. Returns `None` when the field is absent.
+/// on the standard `PowerSupply` resource, exposed via nv-redfish's typed
+/// [`oem_delta`](NvPowerSupply::oem_delta) accessor. Returns `None` when the
+/// Delta extension is absent, its `Power` flag is unset, or the OEM payload
+/// fails to parse.
 fn delta_psu_power_on<B: Bmc>(ps: &NvPowerSupply<B>) -> Option<bool> {
-    delta_power_from_oem(
-        ps.raw()
-            .base
-            .base
-            .oem
-            .as_ref()
-            .map(|oem| &oem.additional_properties),
-    )
+    match ps.oem_delta() {
+        Ok(oem) => oem.and_then(|d| d.power()),
+        Err(e) => {
+            tracing::warn!("failed to parse Delta OEM power supply data: {e:?}");
+            None
+        }
+    }
 }
 
-/// Extracts `deltaenergysystems.Power` from a PSU's raw OEM object (the value
-/// of the resource's `Oem` property). Split out so the JSON shape can be
-/// exercised in unit tests without a live BMC.
-fn delta_power_from_oem(oem: Option<&serde_json::Value>) -> Option<bool> {
-    oem?.get("deltaenergysystems")?.get("Power")?.as_bool()
+/// Delta power-shelf identity gate: a power-shelf chassis (id `chassis` or
+/// `powershelf`) whose manufacturer identifies as Delta. This is what
+/// distinguishes a Delta shelf from the Lite-On shelf, which shares the generic
+/// `powershelf` chassis id but reports a different manufacturer. Split out so
+/// the gate can be exercised in unit tests without a live BMC.
+fn is_delta_powershelf_chassis(chassis_id: &str, manufacturer: Option<&str>) -> bool {
+    (chassis_id == "chassis" || chassis_id == "powershelf")
+        && manufacturer.is_some_and(|mfg| mfg.to_lowercase().contains("delta"))
 }
 
 /// Aggregates per-PSU commanded on/off states into a single power-shelf state.
@@ -533,43 +537,36 @@ impl LiteOnSuppliesState<'_> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use super::{ModelPowerState, is_delta_powershelf_chassis, powershelf_power_state};
 
-    use super::{ModelPowerState, delta_power_from_oem, powershelf_power_state};
-
-    // delta_power_from_oem reads Oem.deltaenergysystems.Power (a bool) off a
-    // PSU. The JSON mirrors the shape Delta BMCs serve at
-    // /redfish/v1/Chassis/chassis/PowerSubsystem/PowerSupplies/N.
+    // is_delta_powershelf_chassis gates Delta detection: a power-shelf chassis
+    // id ("chassis"/"powershelf") AND a Delta manufacturer. The manufacturer
+    // check is case-insensitive and substring-based, and is what separates a
+    // Delta shelf from a Lite-On shelf sharing the "powershelf" chassis id.
     #[test]
-    fn delta_power_from_oem_reads_power_flag() {
-        let on = json!({
-            "deltaenergysystems": {
-                "@odata.type": "#DeltaEnergySystemsPowerSupply.v1_0_0.PowerSupply",
-                "FanSpeedTarget": 0,
-                "Power": true
-            }
-        });
-        let off = json!({ "deltaenergysystems": { "Power": false } });
-
-        assert_eq!(delta_power_from_oem(Some(&on)), Some(true));
-        assert_eq!(delta_power_from_oem(Some(&off)), Some(false));
-        // Missing OEM object, missing vendor key, missing/non-bool Power field
-        // all resolve to None rather than a wrong reading.
-        assert_eq!(delta_power_from_oem(None), None);
-        assert_eq!(delta_power_from_oem(Some(&json!({}))), None);
-        assert_eq!(
-            delta_power_from_oem(Some(&json!({ "deltaenergysystems": {} }))),
-            None
-        );
-        assert_eq!(
-            delta_power_from_oem(Some(&json!({ "deltaenergysystems": { "Power": "true" } }))),
-            None
-        );
-        // Only the Delta vendor key counts; a foreign OEM payload is ignored.
-        assert_eq!(
-            delta_power_from_oem(Some(&json!({ "liteon": { "Power": true } }))),
-            None
-        );
+    fn is_delta_powershelf_chassis_gates_on_id_and_manufacturer() {
+        let cases: [(&str, Option<&str>, bool); 9] = [
+            // Delta manufacturer on either accepted power-shelf chassis id.
+            ("chassis", Some("DELTA"), true),
+            ("powershelf", Some("Delta"), true),
+            // Case-insensitive, substring match on the manufacturer.
+            ("chassis", Some("delta electronics"), true),
+            ("powershelf", Some("Delta Energy Systems"), true),
+            // Right manufacturer but a non-power-shelf chassis id is ignored.
+            ("Card1", Some("DELTA"), false),
+            ("Baseboard", Some("delta"), false),
+            // Power-shelf chassis id but a different (or missing) manufacturer.
+            ("powershelf", Some("Lite-On"), false),
+            ("chassis", Some("NVIDIA"), false),
+            ("chassis", None, false),
+        ];
+        for (id, mfg, expected) in cases {
+            assert_eq!(
+                is_delta_powershelf_chassis(id, mfg),
+                expected,
+                "id={id:?} manufacturer={mfg:?}"
+            );
+        }
     }
 
     // powershelf_power_state collapses per-PSU flags: all-on => On, all-off =>

@@ -60,6 +60,7 @@ nv-redfish = { workspace = true, features = [
   "oem-hpe",
   "oem-ami",
   "oem-liteon",
+  "oem-delta",
   "bmc-http",
 ] }
 regex = { workspace = true }
