@@ -139,7 +139,7 @@ impl MachineATron {
             for machine in &machines {
                 let host_info = machine.host_info();
                 let result = match host_info.hw_type {
-                    HostHardwareType::LiteOnPowerShelf => {
+                    HostHardwareType::LiteOnPowerShelf | HostHardwareType::DeltaPowerShelf => {
                         self.app_context
                             .api_client()
                             .add_expected_power_shelf(

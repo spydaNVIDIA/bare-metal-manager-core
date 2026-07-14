@@ -26,6 +26,7 @@ pub enum BmcVendor {
     Nvidia(NvidiaNamestyle),
     Wiwynn,
     LiteOn,
+    Delta,
     Ami,
     Supermicro,
 }
@@ -44,6 +45,9 @@ impl BmcVendor {
             BmcVendor::Dell => Some("Dell"),
             BmcVendor::Wiwynn => Some("WIWYNN"),
             BmcVendor::LiteOn => None,
+            // Delta power shelves report no `Vendor` in the service root, which
+            // is what leads nv-redfish to fall back to its anonymous-BMC quirk.
+            BmcVendor::Delta => None,
             BmcVendor::Ami => Some("AMI"),
             BmcVendor::Supermicro => Some("Supermicro"),
         }
@@ -59,6 +63,7 @@ impl BmcVendor {
             | BmcVendor::Dell
             | BmcVendor::Wiwynn
             | BmcVendor::LiteOn
+            | BmcVendor::Delta
             | BmcVendor::Supermicro => {
                 format!("{}/Settings", resource.odata_id)
             }

@@ -3232,6 +3232,7 @@ async fn test_site_explorer_pairs_bf4_dpu_from_bluefield_bmc_chassis_serial(
             16,
         )
         .unwrap(),
+        delta_psu_power: None,
     };
     let host_bmc_mac = host_info.bmc_mac_address;
     let host_serial = host_info.serial.clone();
