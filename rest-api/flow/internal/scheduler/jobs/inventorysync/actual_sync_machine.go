@@ -6,12 +6,14 @@ package inventorysync
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -27,20 +29,22 @@ func isMachineComponentType(t string) bool {
 // ---------------------------------------------------------------------------
 //
 // NICo API calls (3 round-trips):
-//   - GetMachines (FindMachineIds + FindMachinesByIds): serial matching,
-//     firmware_version direct-write, and drift comparison data
+//   - GetMachines (FindMachineIds + FindMachinesByIds): BMC-MAC linking,
+//     firmware_version and controller_state direct-write, plus
+//     missing_in_expected detection
 //   - GetPowerStates: power_state direct-write
 //   - GetMachinePositionInfo: position validation fields for drift comparison
 //
 // Flow:
-//  1. DB: get all machine components
-//  2. NICo GetMachines: fetch all machine details (reused for steps 3, 5, and drift)
-//  3. Match by serial → direct-write external_id
+//  1. DB: get all compute components (with BMCs)
+//  2. NICo GetMachines: fetch all machine details (linking, firmware, state, missing_in_expected)
+//  3. Link by BMC MAC (from step 2 data) → direct-write external_id
 //  4. NICo GetPowerStates: direct-write power_state
 //  5. Direct-write firmware_version (from step 2 data)
 //  6. NICo GetMachinePositionInfo: compare validation fields, return drifts
 //
-// Validation fields (compared for drift): slot_id, tray_index, host_id, serial_number
+// Correlation/identity key: BMC MAC address (serial number is not used).
+// Validation fields (compared for drift): slot_id, tray_index, host_id
 // Direct-write fields (written to DB, not compared): external_id, power_state, firmware_version
 func syncMachines(
 	ctx context.Context,
@@ -49,25 +53,21 @@ func syncMachines(
 ) (received int, drifts []model.ComponentDrift, rpcOK bool) {
 	log.Debug().Msg("Syncing machines...")
 
-	// Step 1: Get all machine components from DB
-	allComponents, err := model.GetAllComponents(ctx, pool.DB)
+	// Step 1: Get all compute components (with BMCs) from DB
+	components, err := model.GetComponentsByType(ctx, pool.DB, devicetypes.ComponentTypeCompute)
 	if err != nil {
-		log.Error().Msgf("Unable to retrieve components from db: %v", err)
+		log.Error().Msgf("Unable to retrieve compute components from db: %v", err)
 		return 0, nil, false
-	}
-
-	var components []model.Component
-	for _, c := range allComponents {
-		if isMachineComponentType(c.Type) {
-			components = append(components, c)
-		}
 	}
 
 	if len(components) == 0 {
 		return 0, nil, true
 	}
 
-	// Step 2: Fetch all machine details from NICo
+	// Step 2: Fetch all machine details from NICo. This is the single source
+	// for BMC-MAC linking, firmware_version, controller_state, and
+	// missing_in_expected detection — a failure here means we can't trust this
+	// cycle, so preserve prior state rather than writing a partial view.
 	allMachineDetails, err := nicoClient.GetMachines(ctx)
 	if err != nil {
 		log.Error().Msgf("Unable to retrieve machine details from NICo: %v", err)
@@ -80,11 +80,11 @@ func syncMachines(
 		detailByID[d.MachineID] = d
 	}
 
-	// Step 3: Direct-write external_id by serial matching
+	// Step 3: Direct-write external_id by BMC MAC matching
 	syncMachineIDs(ctx, pool, allMachineDetails, components)
 
 	// Re-read components to pick up any external_id updates
-	allComponents, err = model.GetAllComponents(ctx, pool.DB)
+	allComponents, err := model.GetAllComponents(ctx, pool.DB)
 	if err != nil {
 		log.Error().Msgf("Unable to re-read components from db after machine ID update: %v", err)
 		return received, nil, false
@@ -150,7 +150,7 @@ func syncMachines(
 		}
 
 		externalID := *comp.ComponentID
-		detail, foundDetail := detailByID[externalID]
+		_, foundDetail := detailByID[externalID]
 		position, foundPosition := positionByID[externalID]
 
 		if !foundDetail {
@@ -169,7 +169,7 @@ func syncMachines(
 		if foundPosition {
 			posPtr = &position
 		}
-		fieldDiffs := compareMachineFieldsForDrift(comp, detail, posPtr)
+		fieldDiffs := compareMachineFieldsForDrift(comp, posPtr)
 		if len(fieldDiffs) > 0 {
 			compID := comp.ID
 			drifts = append(drifts, model.ComponentDrift{
@@ -234,29 +234,41 @@ func buildDriftsForUnmatchedComponents(
 	return drifts
 }
 
-// syncMachineIDs matches components by serial number against pre-fetched NICo
-// machine details and direct-writes the external_id.
+// syncMachineIDs matches components by BMC MAC address against pre-fetched NICo
+// machine details and direct-writes the external_id. BMC MAC is the stable
+// identity Core populates on the discovered machine (Machine.bmc_info.mac,
+// surfaced as MachineDetail.BmcMac), so linking no longer depends on serial
+// number.
 func syncMachineIDs(
 	ctx context.Context,
 	pool *cdb.Session,
 	allDetails []nicoapi.MachineDetail,
 	components []model.Component,
 ) {
-	containersBySerial := make(map[string]model.Component)
-	for _, cur := range components {
-		containersBySerial[cur.SerialNumber] = cur
+	// Index discovered machines by normalized BMC MAC → Core MachineId.
+	machineIDByBmcMac := make(map[string]string)
+	for _, cur := range allDetails {
+		if cur.BmcMac != "" && cur.MachineID != "" {
+			machineIDByBmcMac[utils.NormalizeMAC(cur.BmcMac)] = cur.MachineID
+		}
 	}
 
 	var toUpdate []model.Component
-	for _, cur := range allDetails {
-		if cur.ChassisSerial == nil {
+	for _, comp := range components {
+		if len(comp.BMCs) != 1 {
+			log.Error().Msgf("Compute component %s has %d BMCs, expected exactly 1; skipping", comp.SerialNumber, len(comp.BMCs))
 			continue
 		}
-		if container, ok := containersBySerial[*cur.ChassisSerial]; ok {
-			if container.ComponentID == nil || *container.ComponentID != cur.MachineID {
-				componentID := cur.MachineID
-				container.ComponentID = &componentID
-				toUpdate = append(toUpdate, container)
+		bmcMacAddr, err := net.ParseMAC(comp.BMCs[0].MacAddress)
+		if err != nil {
+			log.Error().Msgf("Compute component %s has invalid BMC MAC address %s; skipping", comp.SerialNumber, comp.BMCs[0].MacAddress)
+			continue
+		}
+		if machineID, ok := machineIDByBmcMac[bmcMacAddr.String()]; ok {
+			if comp.ComponentID == nil || *comp.ComponentID != machineID {
+				componentID := machineID
+				comp.ComponentID = &componentID
+				toUpdate = append(toUpdate, comp)
 			}
 		}
 	}
@@ -264,13 +276,13 @@ func syncMachineIDs(
 	if len(toUpdate) > 0 {
 		if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 			for _, cur := range toUpdate {
-				if err := cur.SetComponentIDBySerial(ctx, tx); err != nil {
+				if err := cur.Patch(ctx, tx); err != nil {
 					return fmt.Errorf("Unable to update machine ID: %w", err)
 				}
 			}
 			return nil
 		}); err != nil {
-			log.Error().Msgf("Unable to update components with serial: %v", err)
+			log.Error().Msgf("Unable to update components with BMC MAC: %v", err)
 			return
 		}
 
@@ -367,10 +379,11 @@ func syncMachineStatuses(
 }
 
 // compareMachineFieldsForDrift compares validation fields between expected (DB) and actual (NICo).
-// Validation fields: slot_id, tray_index, host_id, serial_number.
+// Validation fields: slot_id, tray_index, host_id. Serial number is not compared:
+// correlation and drift are keyed on BMC MAC, and a hardware swap surfaces as a
+// BMC-MAC presence change (missing_in_actual / missing_in_expected).
 func compareMachineFieldsForDrift(
 	expected *model.Component,
-	actual nicoapi.MachineDetail,
 	position *nicoapi.MachinePosition,
 ) []model.FieldDiff {
 	var diffs []model.FieldDiff
@@ -419,15 +432,6 @@ func compareMachineFieldsForDrift(
 				ActualValue:   "<missing>",
 			})
 		}
-	}
-
-	// Compare serial_number (chassis_serial)
-	if actual.ChassisSerial != nil && expected.SerialNumber != *actual.ChassisSerial {
-		diffs = append(diffs, model.FieldDiff{
-			FieldName:     driftFieldSerialNumber,
-			ExpectedValue: expected.SerialNumber,
-			ActualValue:   *actual.ChassisSerial,
-		})
 	}
 
 	return diffs

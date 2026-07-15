@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 
@@ -17,6 +18,15 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 )
+
+// createTestBMC inserts a single BMC row for the given component so BMC-MAC
+// linking has a MAC to correlate on.
+func createTestBMC(ctx context.Context, t *testing.T, pool *cdb.Session, componentID uuid.UUID, mac string) {
+	t.Helper()
+	bmc := model.BMC{MacAddress: mac, ComponentID: componentID, Type: "Host"}
+	_, err := pool.DB.NewInsert().Model(&bmc).Exec(ctx)
+	assert.Nil(t, err)
+}
 
 // TestInventory is the main test for the inventory package
 func TestInventory(t *testing.T) {
@@ -34,15 +44,19 @@ func TestInventory(t *testing.T) {
 
 	grpcMock := nicoapi.NewMockClient()
 
-	// Create a basic faked GRPC environment
-	serial1 := "serial1"
-	serial2 := "serial2"
-	serial3 := "serial3"
-	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id1", ChassisSerial: &serial1})
-	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id2", ChassisSerial: &serial2})
-	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id3", ChassisSerial: &serial3})
-	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id4", ChassisSerial: nil})
+	// Create a basic faked GRPC environment. Linking is keyed on BMC MAC now
+	// (matched against the machine's BmcMac), so machines no longer carry a
+	// chassis serial for correlation.
+	mac2 := "aa:bb:cc:dd:ee:02"
+	mac4 := "aa:bb:cc:dd:ee:04"
+	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id1"})
+	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id2", BmcMac: mac2})
+	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id3"})
+	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "id4"})
 	grpcMock.AddPowerState("id2", nicoapi.PowerStateOn)
+
+	// serial2's BMC MAC (mac2) matches machine id2; serial4's BMC MAC (mac4)
+	// matches no machine, so it stays unmatched (missing_in_actual).
 
 	// Create a rack (required for components due to NOT NULL constraint)
 	rack := model.Rack{
@@ -57,9 +71,11 @@ func TestInventory(t *testing.T) {
 	c := model.Component{SerialNumber: "serial2", Manufacturer: "TestMfg", RackID: rack.ID}
 	err = c.Create(ctx, pool.DB)
 	assert.Nil(t, err)
+	createTestBMC(ctx, t, pool, c.ID, mac2)
 	c = model.Component{SerialNumber: "serial4", Manufacturer: "TestMfg2", RackID: rack.ID}
 	err = c.Create(ctx, pool.DB)
 	assert.Nil(t, err)
+	createTestBMC(ctx, t, pool, c.ID, mac4)
 
 	// expectedSyncEnabled=false: this test exercises actual-sync only. The
 	// mock carries no expected machines, so running the mirror would treat
@@ -110,10 +126,12 @@ func TestSyncFirmwareVersion(t *testing.T) {
 
 	grpcMock := nicoapi.NewMockClient()
 
-	serial1 := "fw-serial-1"
-	serial2 := "fw-serial-2"
-	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "fw-id1", ChassisSerial: &serial1, FirmwareVersion: "2.0.0"})
-	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "fw-id2", ChassisSerial: &serial2, FirmwareVersion: "3.1.0"})
+	// Link both components to their Core machines by BMC MAC (matched against
+	// the machine's BmcMac).
+	mac1 := "aa:bb:cc:dd:ff:01"
+	mac2 := "aa:bb:cc:dd:ff:02"
+	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "fw-id1", BmcMac: mac1, FirmwareVersion: "2.0.0"})
+	grpcMock.AddMachine(nicoapi.MachineDetail{MachineID: "fw-id2", BmcMac: mac2, FirmwareVersion: "3.1.0"})
 	grpcMock.AddPowerState("fw-id1", nicoapi.PowerStateOn)
 
 	rack := model.Rack{
@@ -127,10 +145,12 @@ func TestSyncFirmwareVersion(t *testing.T) {
 	c1 := model.Component{SerialNumber: "fw-serial-1", Manufacturer: "TestMfg", RackID: rack.ID, FirmwareVersion: "1.0.0"}
 	err = c1.Create(ctx, pool.DB)
 	assert.Nil(t, err)
+	createTestBMC(ctx, t, pool, c1.ID, mac1)
 
 	c2 := model.Component{SerialNumber: "fw-serial-2", Manufacturer: "TestMfg", RackID: rack.ID, FirmwareVersion: "1.0.0"}
 	err = c2.Create(ctx, pool.DB)
 	assert.Nil(t, err)
+	createTestBMC(ctx, t, pool, c2.ID, mac2)
 
 	// expectedSyncEnabled=false: actual-sync only. See TestInventory for why
 	// the mirror must stay off here (empty expected-mock would soft-delete
