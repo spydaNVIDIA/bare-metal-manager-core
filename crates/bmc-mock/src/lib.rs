@@ -68,6 +68,8 @@ pub enum HostHardwareType {
     SupermicroGb300Nvl,
     #[serde(rename = "liteon_power_shelf")]
     LiteOnPowerShelf,
+    #[serde(rename = "delta_power_shelf")]
+    DeltaPowerShelf,
     #[serde(rename = "nvidia_switch_nd5200_ld")]
     NvidiaSwitchNd5200Ld,
     #[serde(rename = "nvidia_dgx_h100")]
@@ -91,6 +93,7 @@ impl fmt::Display for HostHardwareType {
             Self::NvidiaDgxGb300 => "NVIDIA DGX GB300 NVL".fmt(f),
             Self::SupermicroGb300Nvl => "Supermicro GB300 NVL".fmt(f),
             Self::LiteOnPowerShelf => "Lite-On Power Shelf".fmt(f),
+            Self::DeltaPowerShelf => "Delta Power Shelf".fmt(f),
             Self::NvidiaSwitchNd5200Ld => "NVIDIA Switch ND5200_LD".fmt(f),
             Self::NvidiaDgxH100 => "NVIDIA DGX H100".fmt(f),
             Self::GenericAmi => "Generic AMI Server".fmt(f),
@@ -112,6 +115,7 @@ impl HostHardwareType {
             Self::NvidiaDgxGb300 => Some(1),
             Self::SupermicroGb300Nvl => Some(1),
             Self::LiteOnPowerShelf => Some(0),
+            Self::DeltaPowerShelf => Some(0),
             Self::NvidiaSwitchNd5200Ld => Some(0),
             Self::NvidiaDgxH100 => Some(1),
             Self::GenericAmi => None,
