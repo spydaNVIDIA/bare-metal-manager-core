@@ -18,7 +18,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func isMachineComponentType(t string) bool {

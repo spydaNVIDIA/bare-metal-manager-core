@@ -18,7 +18,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi/gen"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // createTestBMC inserts a single BMC row for the given component so BMC-MAC
