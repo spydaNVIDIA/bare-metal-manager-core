@@ -18,6 +18,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func isMachineComponentType(t string) bool {
@@ -246,8 +247,15 @@ func syncMachineIDs(
 	components []model.Component,
 ) {
 	// Index discovered machines by normalized BMC MAC → Core MachineId.
+	// Restrict to HOST machines: a compute component owns both a host BMC and
+	// a DPU BMC, and Core exposes the DPU as its own MachineDetail whose BmcMac
+	// is that DPU BMC. Including DPUs here would let a compute component's DPU
+	// BMC resolve to the DPU's machine id instead of the host's.
 	machineIDByBmcMac := make(map[string]string)
 	for _, cur := range allDetails {
+		if cur.MachineType != corev1.MachineType_HOST.String() {
+			continue
+		}
 		if cur.BmcMac != "" && cur.MachineID != "" {
 			machineIDByBmcMac[utils.NormalizeMAC(cur.BmcMac)] = cur.MachineID
 		}
@@ -255,21 +263,36 @@ func syncMachineIDs(
 
 	var toUpdate []model.Component
 	for _, comp := range components {
-		if len(comp.BMCs) != 1 {
-			log.Error().Msgf("Compute component %s has %d BMCs, expected exactly 1; skipping", comp.SerialNumber, len(comp.BMCs))
+		if len(comp.BMCs) == 0 {
+			log.Error().
+				Str("component_id", comp.ID.String()).
+				Str("rack_id", comp.RackID.String()).
+				Msg("Compute component has no BMCs; skipping")
 			continue
 		}
-		bmcMacAddr, err := net.ParseMAC(comp.BMCs[0].MacAddress)
-		if err != nil {
-			log.Error().Msgf("Compute component %s has invalid BMC MAC address %s; skipping", comp.SerialNumber, comp.BMCs[0].MacAddress)
-			continue
-		}
-		if machineID, ok := machineIDByBmcMac[bmcMacAddr.String()]; ok {
+		// A compute component can legitimately expose several BMCs (e.g. host
+		// and DPU). Core advertises only one of them as MachineDetail.BmcMac,
+		// so try each BMC and link on the first that resolves to a machine.
+		for _, bmc := range comp.BMCs {
+			bmcMacAddr, err := net.ParseMAC(bmc.MacAddress)
+			if err != nil {
+				log.Error().
+					Str("component_id", comp.ID.String()).
+					Str("rack_id", comp.RackID.String()).
+					Str("bmc_mac_address", bmc.MacAddress).
+					Msg("Compute component has invalid BMC MAC address; skipping")
+				continue
+			}
+			machineID, ok := machineIDByBmcMac[bmcMacAddr.String()]
+			if !ok {
+				continue
+			}
 			if comp.ComponentID == nil || *comp.ComponentID != machineID {
 				componentID := machineID
 				comp.ComponentID = &componentID
 				toUpdate = append(toUpdate, comp)
 			}
+			break
 		}
 	}
 

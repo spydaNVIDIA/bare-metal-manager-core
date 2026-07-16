@@ -92,7 +92,6 @@ func GetAllComponents(ctx context.Context, idb bun.IDB) (ret []Component, err er
 	return ret, err
 }
 
-// GetComponentsByType returns all components of a specific type with their associated BMCs
 // GetComponentsByType returns all components of the given type, with each
 // component's BMCs relation preloaded (callers rely on this for BMC-MAC-based
 // linking).
