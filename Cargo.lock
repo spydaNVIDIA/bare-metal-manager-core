@@ -2682,6 +2682,7 @@ dependencies = [
  "prometheus",
  "rand 0.10.1",
  "serde",
+ "serde_yaml",
  "tempfile",
  "tera",
  "tokio",
