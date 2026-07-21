@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -172,10 +173,12 @@ impl BfbRshimCopier {
     /// a `bf.cfg` blob carrying the BMC credentials.
     ///
     /// The `bf.cfg` blob embeds the BMC root password in cleartext, so the
-    /// artifact is created with `0o600` (owner read/write only). The mode is
-    /// applied atomically by `open` at creation time rather than being left to
-    /// the process umask, so the password is never momentarily readable by other
-    /// local users/processes.
+    /// artifact must be readable only by its owner (`0o600`). `.mode(0o600)` on
+    /// the `open` keeps the file from ever being group/other-readable at
+    /// creation, but it is still filtered by the process umask (e.g. it resolves
+    /// to `0o000` under a `0o777` umask), so the mode is then pinned exactly with
+    /// `set_permissions` — which `chmod`s the fd and is not umask-dependent —
+    /// before any secret bytes are written.
     async fn write_unified_preingestion_bfb(
         source_bfb_path: &str,
         unified_bfb_path: &str,
@@ -206,9 +209,17 @@ impl BfbRshimCopier {
                     details: format!("failed to create {unified_bfb_path}: {err}"),
                 })?;
 
+            // Pin the mode to exactly 0o600 regardless of the process umask,
+            // before the cleartext credentials are written to the file.
+            unified_bfb
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .await
+                .map_err(|err| BfbRshimCopyError::Other {
+                    details: format!("failed to set permissions on {unified_bfb_path}: {err}"),
+                })?;
+
             let mut buffer = vec![0; 1024 * 1024].into_boxed_slice(); // 1 MB buffer
 
-            tracing::info!(path = unified_bfb_path, "Writing BFB payload");
             loop {
                 let n = preingestion_bfb.read(&mut buffer).await.map_err(|err| {
                     BfbRshimCopyError::Other {
@@ -226,8 +237,6 @@ impl BfbRshimCopier {
                     }
                 })?;
             }
-
-            tracing::info!(path = unified_bfb_path, "Writing bf.cfg payload");
 
             unified_bfb
                 .write_all(bf_cfg_contents.as_bytes())
@@ -280,15 +289,53 @@ impl BfbRshimCopier {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     use super::*;
 
-    /// The unified BFB embeds the BMC root password in cleartext, so the
-    /// assembled artifact must be readable only by its owner (`0o600`),
-    /// independent of the process umask.
-    #[tokio::test]
-    async fn write_unified_preingestion_bfb_creates_owner_only_artifact() {
+    // The umask is process-global (shared across threads on Linux), so tests
+    // that depend on or mutate it must not run concurrently. Serialize them
+    // behind one lock, and use plain `#[test]` + `block_on` so the guard is
+    // never held across an `.await` (which `clippy::await_holding_lock` forbids).
+    static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restores the process umask on drop so a failing assertion cannot leak a
+    /// restrictive umask into other tests.
+    struct UmaskGuard(libc::mode_t);
+
+    impl UmaskGuard {
+        fn set(mask: libc::mode_t) -> Self {
+            // SAFETY: `umask` cannot fail; it swaps and returns the prior mask.
+            let previous = unsafe { libc::umask(mask) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            // SAFETY: restoring the previously saved process umask.
+            unsafe { libc::umask(self.0) };
+        }
+    }
+
+    fn run_case(umask_value: libc::mode_t) {
+        // Poisoning is fine here: `UmaskGuard` still restores the umask on a
+        // panicking test, so recover the guard rather than cascade failures.
+        let _serial = UMASK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime")
+            .block_on(assert_owner_only_artifact(umask_value));
+    }
+
+    /// Writes the unified BFB while the given umask is in effect and asserts the
+    /// artifact is owner-only (`0o600`) and carries the base BFB plus the
+    /// credential-bearing `bf.cfg` blob.
+    async fn assert_owner_only_artifact(umask_value: libc::mode_t) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let source_path = dir.path().join("preingestion.bfb");
         let unified_path = dir.path().join("preingestion_unified_update.bfb");
@@ -297,6 +344,10 @@ mod tests {
         fs::write(&source_path, base_payload)
             .await
             .expect("write source bfb");
+
+        // Fixtures above are created under the ambient umask so they stay
+        // readable; only the write-under-test runs with the restrictive umask.
+        let umask_guard = UmaskGuard::set(umask_value);
 
         BfbRshimCopier::write_unified_preingestion_bfb(
             source_path.to_str().expect("utf-8 source path"),
@@ -307,7 +358,13 @@ mod tests {
         .await
         .expect("write unified bfb");
 
-        let mode = fs::metadata(&unified_path)
+        drop(umask_guard);
+
+        assert_bf_cfg_contents(&unified_path, base_payload).await;
+    }
+
+    async fn assert_bf_cfg_contents(unified_path: &Path, base_payload: &[u8]) {
+        let mode = fs::metadata(unified_path)
             .await
             .expect("stat unified bfb")
             .permissions()
@@ -320,7 +377,7 @@ mod tests {
         );
 
         // The base BFB is concatenated with the bf.cfg blob carrying the creds.
-        let written = fs::read(&unified_path).await.expect("read unified bfb");
+        let written = fs::read(unified_path).await.expect("read unified bfb");
         assert!(
             written.starts_with(base_payload),
             "unified BFB must start with the base BFB payload"
@@ -328,5 +385,20 @@ mod tests {
         let bf_cfg = String::from_utf8_lossy(&written[base_payload.len()..]);
         assert!(bf_cfg.contains("BMC_USER=\"root\""));
         assert!(bf_cfg.contains("BMC_PASSWORD=\"s3cr3t-p@ssw0rd\""));
+    }
+
+    /// The unified BFB embeds the BMC root password in cleartext, so the
+    /// assembled artifact must be readable only by its owner (`0o600`).
+    #[test]
+    fn write_unified_preingestion_bfb_creates_owner_only_artifact() {
+        run_case(0o022);
+    }
+
+    /// Regression for the umask-filtering gap: with only `.mode(0o600)` on the
+    /// `open`, a `0o777` umask leaves the artifact `0o000`. The explicit
+    /// `set_permissions` must still pin it to `0o600`.
+    #[test]
+    fn write_unified_preingestion_bfb_pins_mode_under_restrictive_umask() {
+        run_case(0o777);
     }
 }
