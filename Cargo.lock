@@ -2775,6 +2775,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-instrument",
  "carbide-secrets",
+ "carbide-test-support",
  "carbide-utils",
  "chrono",
  "http",
