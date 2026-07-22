@@ -30,7 +30,10 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use component_manager::component_manager::{ComponentManager, SwitchMaintenanceRequestResult};
-use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayVendor};
+use component_manager::compute_tray_manager::{
+    ComputeTrayEndpoint, ComputeTrayManager, ComputeTrayVendor,
+};
+use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::SwitchEndpoint;
 use component_manager::power_shelf_manager::{PowerShelfEndpoint, PowerShelfVendor};
@@ -1633,112 +1636,110 @@ pub(crate) async fn component_power_control(
             }
         }
         rpc::component_power_control_request::Target::MachineIds(list) => {
-            if cm.compute_tray_use_state_controller && !bypass_state_controller {
-                let results = queue_machine_power_control_via_state_controller(
+            // Divide the requested machines the same way compute firmware
+            // updates do: rack-scale (MNNVL) systems vs standalone servers. Only
+            // rack-scale systems have a compute-tray backend (RMS) and a
+            // state-controller maintenance flow; standalone servers are always
+            // driven synchronously through NICo-core's Redfish stack, because
+            // RMS cannot power-control them.
+            let (rack_scale_ids, standalone_ids) =
+                partition_compute_machines_by_rack_scale(api, &list.machine_ids).await?;
+
+            // Update the power-manager desired state for every requested machine
+            // up front, before splitting. The state controller does not do this
+            // today, so the handler owns it regardless of which dispatch path
+            // (rack vs standalone) a machine ultimately takes.
+            //
+            // The health override exists only to satisfy `update_power_option`'s
+            // precondition for powering a host off (it requires an
+            // `internal_maintenance` / `suppress_external_alerting` alert). The
+            // Redfish dispatch does not need it, so it brackets just the
+            // power-manager change. Durable alert suppression for an
+            // intentionally-off host comes from `desired_power_state` itself.
+            let desired_state = desired_power_state(action) as i32;
+            let mut results: Vec<rpc::ComponentResult> = Vec::new();
+            for &machine_id in &list.machine_ids {
+                let override_inserted = power_control_health_override(api, machine_id, true).await;
+
+                let power_req = rpc::PowerOptionUpdateRequest {
+                    machine_id: Some(machine_id),
+                    power_state: desired_state,
+                };
+                match crate::handlers::power_options::update_power_option(
                     api,
-                    cm,
-                    &list.machine_ids,
+                    Request::new(power_req),
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(e)
+                        if e.code() == Code::InvalidArgument
+                            && e.message().contains("already set as") =>
+                    {
+                        tracing::debug!(
+                            %machine_id,
+                            desired_state,
+                            "power option already in desired state, skipping"
+                        );
+                    }
+                    Err(e) => {
+                        results.push(error_result(
+                            &machine_id.to_string(),
+                            format!("failed to update power option: {e}"),
+                        ));
+                    }
+                }
+
+                if override_inserted {
+                    power_control_health_override(api, machine_id, false).await;
+                }
+            }
+
+            let mut ips: Vec<IpAddr> = Vec::new();
+
+            // Rack-scale systems: the state-controller maintenance flow when
+            // enabled, otherwise a synchronous dispatch through the configured
+            // backend (RMS).
+            if !rack_scale_ids.is_empty() {
+                if cm.compute_tray_use_state_controller && !bypass_state_controller {
+                    let sc_results = queue_machine_power_control_via_state_controller(
+                        api,
+                        cm,
+                        &rack_scale_ids,
+                        action,
+                    )
+                    .await?;
+                    results.extend(sc_results);
+                } else {
+                    let (rack_results, rack_ips) = dispatch_compute_tray_power_control(
+                        api,
+                        cm.compute_tray.as_ref(),
+                        &rack_scale_ids,
+                        action,
+                    )
+                    .await?;
+                    results.extend(rack_results);
+                    ips.extend(rack_ips);
+                }
+            }
+
+            // Standalone servers: always synchronous, always NICo-core's Redfish
+            // stack (never the state machine, which has no non-rack path), so
+            // power control works even when the configured backend is RMS.
+            if !standalone_ids.is_empty() {
+                let core_backend = CoreComputeTrayManager::new(api.redfish_pool.clone());
+                let (standalone_results, standalone_ips) = dispatch_compute_tray_power_control(
+                    api,
+                    &core_backend,
+                    &standalone_ids,
                     action,
                 )
                 .await?;
-                let ips = Vec::new();
-                (results, ips)
-            } else {
-                let resolved = resolve_compute_tray_endpoints(api, &list.machine_ids).await?;
-
-                let mut results: Vec<_> = resolved
-                    .unresolved
-                    .iter()
-                    .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
-                    .collect();
-
-                let resolved_machine_ids: Vec<_> = resolved
-                    .resolved
-                    .endpoints
-                    .iter()
-                    .filter_map(|ep| resolved.resolved.ip_to_machine_id.get(&ep.bmc_ip).copied())
-                    .collect();
-
-                // Insert health overrides and update power-manager desired state
-                // before issuing Redfish commands.
-                let desired_state = desired_power_state(action) as i32;
-                let mut overrides_inserted = Vec::new();
-                for &machine_id in &resolved_machine_ids {
-                    let inserted = power_control_health_override(api, machine_id, true).await;
-                    if inserted {
-                        overrides_inserted.push(machine_id);
-                    }
-
-                    let power_req = rpc::PowerOptionUpdateRequest {
-                        machine_id: Some(machine_id),
-                        power_state: desired_state,
-                    };
-                    match crate::handlers::power_options::update_power_option(
-                        api,
-                        Request::new(power_req),
-                    )
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(e)
-                            if e.code() == Code::InvalidArgument
-                                && e.message().contains("already set as") =>
-                        {
-                            tracing::debug!(
-                                %machine_id,
-                                desired_state,
-                                "power option already in desired state, skipping"
-                            );
-                        }
-                        Err(e) => {
-                            results.push(error_result(
-                                &machine_id.to_string(),
-                                format!("failed to update power option: {e}"),
-                            ));
-                        }
-                    }
-                }
-
-                tracing::info!(
-                    backend = cm.compute_tray.name(),
-                    compute_tray_count = resolved.resolved.endpoints.len(),
-                    ?action,
-                    "power control for compute trays"
-                );
-                let backend_results = cm
-                    .compute_tray
-                    .power_control(&resolved.resolved.endpoints, action)
-                    .await
-                    .map_err(component_manager_error_to_status)?;
-
-                // Clear health overrides after Redfish dispatch.
-                for machine_id in &overrides_inserted {
-                    power_control_health_override(api, *machine_id, false).await;
-                }
-
-                let ips: Vec<IpAddr> = resolved
-                    .resolved
-                    .endpoints
-                    .iter()
-                    .map(|ep| ep.bmc_ip)
-                    .collect();
-
-                results.extend(backend_results.into_iter().map(|r| {
-                    let id = resolved
-                        .resolved
-                        .ip_to_machine_id
-                        .get(&r.bmc_ip)
-                        .map(|id| id.to_string())
-                        .unwrap_or_else(|| r.bmc_ip.to_string());
-                    if r.success {
-                        success_result(&id)
-                    } else {
-                        error_result(&id, r.error.unwrap_or_default())
-                    }
-                }));
-
-                (results, ips)
+                results.extend(standalone_results);
+                ips.extend(standalone_ips);
             }
+
+            (results, ips)
         }
     };
 
@@ -1751,6 +1752,62 @@ pub(crate) async fn component_power_control(
     Ok(Response::new(rpc::ComponentPowerControlResponse {
         results,
     }))
+}
+
+/// Resolve BMC endpoints for `machine_ids`, issue power control through
+/// `backend`, and return per-machine results (keyed by machine id via the
+/// resolved `ip_to_machine_id` map) alongside the BMC IPs that were dispatched
+/// to, so the caller can request site re-exploration for them.
+///
+/// Shared by the rack-scale synchronous path (configured backend, e.g. RMS) and
+/// the standalone path (always NICo-core's Redfish backend).
+async fn dispatch_compute_tray_power_control(
+    api: &Api,
+    backend: &dyn ComputeTrayManager,
+    machine_ids: &[MachineId],
+    action: PowerAction,
+) -> Result<(Vec<rpc::ComponentResult>, Vec<IpAddr>), Status> {
+    let resolved = resolve_compute_tray_endpoints(api, machine_ids).await?;
+
+    let mut results: Vec<rpc::ComponentResult> = resolved
+        .unresolved
+        .iter()
+        .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+        .collect();
+
+    tracing::info!(
+        backend = backend.name(),
+        compute_tray_count = resolved.resolved.endpoints.len(),
+        ?action,
+        "power control for compute trays"
+    );
+    let backend_results = backend
+        .power_control(&resolved.resolved.endpoints, action)
+        .await
+        .map_err(component_manager_error_to_status)?;
+
+    let ips: Vec<IpAddr> = resolved
+        .resolved
+        .endpoints
+        .iter()
+        .map(|ep| ep.bmc_ip)
+        .collect();
+
+    results.extend(backend_results.into_iter().map(|r| {
+        let id = resolved
+            .resolved
+            .ip_to_machine_id
+            .get(&r.bmc_ip)
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| r.bmc_ip.to_string());
+        if r.success {
+            success_result(&id)
+        } else {
+            error_result(&id, r.error.unwrap_or_default())
+        }
+    }));
+
+    Ok((results, ips))
 }
 
 pub(crate) async fn component_configure_switch_certificate(
