@@ -99,7 +99,7 @@ struct RedfishSimState {
     /// [`RedfishError::GenericError`] carrying this message (tests seed it with a
     /// secret to assert redaction end to end). Takes precedence over the auth
     /// and reuse checks so it can model a change that fails after authenticating.
-    change_error: Option<String>,
+    change_password_error: Option<String>,
 }
 
 /// Build the `HTTPErrorCode` a real BMC would return for a rejected request, so
@@ -329,8 +329,8 @@ impl RedfishSim {
 
     /// Force every password change to fail with a [`RedfishError::GenericError`]
     /// carrying `message`, so redaction of the recorded error can be asserted.
-    pub fn set_change_error(&self, message: impl Into<String>) {
-        self.state.lock().unwrap().change_error = Some(message.into());
+    pub fn set_change_password_error(&self, message: impl Into<String>) {
+        self.state.lock().unwrap().change_password_error = Some(message.into());
     }
 
     /// Override the `Vendor` reported by `get_service_root`. Set it to an
@@ -711,7 +711,7 @@ impl Redfish for RedfishSimClient {
         Box::pin(async move {
             let s_user = user.to_string();
             let mut state = self.state.lock().unwrap();
-            if let Some(message) = &state.change_error {
+            if let Some(message) = &state.change_password_error {
                 return Err(RedfishError::GenericError {
                     error: message.clone(),
                 });
@@ -748,7 +748,7 @@ impl Redfish for RedfishSimClient {
         Box::pin(async move {
             let s_acct = account_id.to_string();
             let mut state = self.state.lock().unwrap();
-            if let Some(message) = &state.change_error {
+            if let Some(message) = &state.change_password_error {
                 return Err(RedfishError::GenericError {
                     error: message.clone(),
                 });

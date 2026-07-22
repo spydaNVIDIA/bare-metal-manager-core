@@ -696,7 +696,7 @@ mod tests {
         // fault (not a clean rejection): both failures are surfaced so the
         // recorded reason makes clear convergence could not even be confirmed.
         let sim = bmc_on_password("mystery");
-        sim.set_change_error("change boom");
+        sim.set_change_password_error("change boom");
         sim.set_get_accounts_error(true);
 
         let err = change_or_recover(&sim, &target(), creds("root", "old"), creds("root", "new"))
@@ -839,7 +839,7 @@ mod tests {
         // is quarantined. Redaction is exercised end to end: the redfish layer
         // and the engine both strip the password before it is recorded.
         let redfish = bmc_on_password("mystery");
-        redfish.set_change_error("BMC rejected login with password=topsecret");
+        redfish.set_change_password_error("BMC rejected login with password=topsecret");
 
         let before = Utc::now();
         let outcome = rotate_bmc(&pool, &cm, &redfish, &target()).await.unwrap();
