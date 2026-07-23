@@ -1689,10 +1689,10 @@ pub(crate) async fn component_power_control(
                 let is_rack_scale = match machine_is_rack_scale(&machines_by_id, machine_id) {
                     Ok(v) => v,
                     Err(status) => {
-                        results.push(error_result(
-                            &machine_id.to_string(),
-                            status.message().to_string(),
-                        ));
+                        // Preserve the tonic status code (NotFound for an unknown
+                        // id) in the per-machine result instead of flattening it to
+                        // InternalError.
+                        results.push(status_result(&machine_id.to_string(), status));
                         continue;
                     }
                 };
@@ -1824,16 +1824,18 @@ pub(crate) async fn component_power_control(
     }))
 }
 
-/// Fan a whole-partition dispatch failure out to one `error_result` per machine
-/// in that partition, so a failure in one partition never discards results
-/// already committed for the other partition or for the power-option updates.
+/// Fan a whole-partition dispatch failure out to one result per machine in that
+/// partition, so a failure in one partition never discards results already
+/// committed for the other partition or for the power-option updates. The tonic
+/// status code is preserved per machine (e.g. `Unavailable` for a backend that
+/// is down) rather than flattened to `InternalError`.
 fn partition_error_results(
     machine_ids: &[MachineId],
     status: &Status,
 ) -> Vec<rpc::ComponentResult> {
     machine_ids
         .iter()
-        .map(|id| error_result(&id.to_string(), status.message().to_string()))
+        .map(|id| status_result(&id.to_string(), status.clone()))
         .collect()
 }
 
@@ -3362,6 +3364,54 @@ mod tests {
         assert_eq!(r.error, "boom");
     }
 
+    #[test]
+    fn status_result_maps_tonic_codes_and_defaults_to_internal_error() {
+        use super::status_result;
+
+        let cases = [
+            (
+                Status::not_found("missing"),
+                rpc::ComponentManagerStatusCode::NotFound,
+            ),
+            (
+                Status::invalid_argument("bad"),
+                rpc::ComponentManagerStatusCode::InvalidArgument,
+            ),
+            (
+                Status::failed_precondition("precondition"),
+                rpc::ComponentManagerStatusCode::InvalidArgument,
+            ),
+            (
+                Status::already_exists("dup"),
+                rpc::ComponentManagerStatusCode::AlreadyExists,
+            ),
+            (
+                Status::unavailable("down"),
+                rpc::ComponentManagerStatusCode::Unavailable,
+            ),
+            // Codes without an explicit arm collapse to InternalError.
+            (
+                Status::internal("boom"),
+                rpc::ComponentManagerStatusCode::InternalError,
+            ),
+            (
+                Status::permission_denied("nope"),
+                rpc::ComponentManagerStatusCode::InternalError,
+            ),
+        ];
+
+        for (status, expected) in cases {
+            let message = status.message().to_string();
+            let r = status_result("machine-1", status);
+            assert_eq!(r.component_id, "machine-1");
+            assert_eq!(
+                r.status, expected as i32,
+                "unexpected mapping for {message:?}"
+            );
+            assert_eq!(r.error, message);
+        }
+    }
+
     fn test_switch_id() -> SwitchId {
         use carbide_uuid::switch::{SwitchIdSource, SwitchType};
         SwitchId::new(SwitchIdSource::Tpm, [0u8; 32], SwitchType::NvLink)
@@ -3667,9 +3717,10 @@ mod tests {
         assert_eq!(results.len(), ids.len());
         for (result, id) in results.iter().zip(ids) {
             assert_eq!(result.component_id, id.to_string());
+            // The dispatch status code is preserved per machine, not flattened.
             assert_eq!(
                 result.status,
-                rpc::ComponentManagerStatusCode::InternalError as i32
+                rpc::ComponentManagerStatusCode::Unavailable as i32
             );
             assert!(result.error.contains("backend down"));
         }

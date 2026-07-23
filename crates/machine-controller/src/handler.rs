@@ -2362,7 +2362,19 @@ impl StateHandler for MachineStateHandler {
             continue_state_machine,
             msg,
         } = match mh_snapshot.host_snapshot.state.value {
-            ManagedHostState::Ready if self.power_options_config.enabled => {
+            // A pending maintenance request takes precedence over power-manager
+            // handling: `handle_power` can return `continue_state_machine = false`
+            // (e.g. desired state Off), which would keep `attempt_state_transition`
+            // -- and therefore `maintenance_transition_if_requested` -- from ever
+            // running, starving the queued operation. Skipping power handling here
+            // lets the request reach the Maintenance transition.
+            ManagedHostState::Ready
+                if self.power_options_config.enabled
+                    && mh_snapshot
+                        .host_snapshot
+                        .machine_maintenance_requested
+                        .is_none() =>
+            {
                 power::handle_power(mh_snapshot, ctx, &self.power_options_config).await?
             }
             _ => PowerHandlingOutcome::new(None, true, None),
